@@ -1,0 +1,4 @@
+data/
+ref/
+meta/*.json
+__pycache__/
