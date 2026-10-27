@@ -1,7 +1,7 @@
 """Check the beam_steer vLLM plugin against transformers on a tiny random Beam in the real FP8 checkpoint format.
 
     python vllm_tiny_check.py ref OUT       # transformers: build checkpoint, reference logprobs and residual norms
-    python vllm_tiny_check.py vllm OUT fp8|bf16 [--eager]   # vLLM + beam_steer, written to OUT/vllm_<ckpt>_<mode>.json
+    python vllm_tiny_check.py vllm OUT fp8|bf16|nvfp4 [--eager] [--moe BACKEND]   # vLLM + beam_steer -> OUT/vllm_<tag>.json
     python vllm_tiny_check.py compare OUT   # verdict
 
 The tiny model takes the real config.json (meta/config.json, or OUT/real_config.json) and shrinks only the sizes,
@@ -10,6 +10,12 @@ the Hub's names with the Hub's compressed-tensors quantization_config; the refer
 (rounded to BF16) in float32. vLLM also quantises activations to FP8 per token, so on that checkpoint agreement is
 close, not exact. A second, BF16 checkpoint holds the same dequantised weights without quantization, so vLLM's
 result there is held to a tight tolerance on every slot.
+
+A third checkpoint follows the Hub's NVFP4 release (ModelOpt): only routed experts are quantised, to E2M1 values in
+groups of 16 with FP8 group scales, an FP32 per-tensor scale and a static FP32 input scale calibrated on the
+reference activations; everything else is BF16 (routers FP32). It has its own reference, whose experts hold the
+dequantised NVFP4 weights. Through Marlin (W4A16, BF16 activations) vLLM is held to that reference's BF16 floor;
+the default Blackwell kernel also quantises activations to FP4 (W4A4) and is reported only.
 
 Steering slots: 1 pushes the residual leaving dense layer 1, 2 the one leaving MoE layer 5, 3 both layers 2 and 6.
 Each push is 0.8 x the reference median residual norm leaving that layer, along a fixed random direction.
@@ -77,6 +83,101 @@ def _hub_named(state, config):
     return named
 
 
+E2M1_GRID = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6])
+
+
+def nvfp4(w, scale2):
+    """ModelOpt NVFP4 of w [out, in]: (packed uint8 [out, in/2], FP8 group scales [out, in/16], dequantised fp32)."""
+    out_dim, in_dim = w.shape
+    groups = w.reshape(out_dim, in_dim // 16, 16)
+    scale = (groups.abs().amax(-1) / 6 / scale2).to(torch.float8_e4m3fn)
+    denom = (scale.float() * scale2).clamp_min(1e-30)[..., None]
+    x = (groups / denom).clamp(-6, 6)
+    idx = (x.abs()[..., None] - E2M1_GRID).abs().argmin(-1)
+    codes = (idx | ((x < 0).long() << 3)).reshape(out_dim, in_dim)
+    deq = (E2M1_GRID[idx] * torch.where(x < 0, -1.0, 1.0) * denom).reshape(out_dim, in_dim)
+    packed = (codes[:, 0::2] | (codes[:, 1::2] << 4)).to(torch.uint8)
+    return packed, scale, deq
+
+
+def ref_nvfp4(out):
+    """NVFP4 checkpoint and its reference, built from the reference model ref() saved."""
+    from safetensors.torch import save_file
+
+    model, pushes, ps = _load_ref_model(out), _pushes(out), prompts()
+    config = model.config
+    inter = config.moe_intermediate_size
+    # Calibrate static input scales on the unsteered prompts: MoE input, and every expert's intermediate activation.
+    moe_in = {}
+    hooks = [layer.mlp.register_forward_pre_hook(lambda m, a, i=i: moe_in.setdefault(i, []).append(a[0].reshape(-1, a[0].shape[-1])))
+             for i, layer in enumerate(model.model.layers) if config.mlp_layer_types[i] == "sparse"]
+    for ids in ps:
+        _run(model, ids)
+    for h in hooks:
+        h.remove()
+    tensors = {}
+    with torch.no_grad():
+        for i, layer in enumerate(model.model.layers):
+            if config.mlp_layer_types[i] != "sparse":
+                continue
+            x = torch.cat(moe_in[i])
+            experts = layer.mlp.experts
+            act = torch.nn.functional.silu(torch.einsum("th,eoh->eto", x, experts.gate_up_proj[:, :inter]))
+            act = act * torch.einsum("th,eoh->eto", x, experts.gate_up_proj[:, inter:])
+            in_scale = {"gate": x.abs().max() / (6 * 448), "down": act.abs().max() / (6 * 448)}
+            for e in range(config.num_experts):
+                base = f"model.layers.{i}.mlp.experts.{e}."
+                gu = experts.gate_up_proj[e]
+                s2 = gu.abs().max() / (6 * 448)  # gate and up share one per-tensor scale: vLLM fuses them
+                for part, rows in (("gate", slice(0, inter)), ("up", slice(inter, 2 * inter))):
+                    q, sc, deq = nvfp4(gu[rows], s2)
+                    gu[rows] = deq
+                    tensors |= {base + f"{part}_proj.weight": q, base + f"{part}_proj.weight_scale": sc,
+                                base + f"{part}_proj.weight_scale_2": s2.float().reshape(()),
+                                base + f"{part}_proj.input_scale": in_scale["gate"].float().reshape(())}
+                d = experts.down_proj[e]
+                s2 = d.abs().max() / (6 * 448)
+                q, sc, deq = nvfp4(d, s2)
+                d.copy_(deq)
+                tensors |= {base + "down_proj.weight": q, base + "down_proj.weight_scale": sc,
+                            base + "down_proj.weight_scale_2": s2.float().reshape(()),
+                            base + "down_proj.input_scale": in_scale["down"].float().reshape(())}
+    router = ("mlp.gate.weight", "e_score_correction_bias")
+    for n, t in _hub_named(model.state_dict(), config).items():
+        if ".mlp.experts." not in n:
+            tensors[n] = t.contiguous() if n.endswith(router) else t.to(torch.bfloat16).contiguous()
+    ignore = ["lm_head", "model.embed_tokens", *[f"model.layers.{i}*" for i in range(3)],
+              *[f"model.layers.{i}.{m}" for i in range(3, config.num_hidden_layers) for m in ("mlp.gate", "self_attn*")]]
+    quant = {"config_groups": {"group_0": {
+                 "input_activations": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": 16},
+                 "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": 16}, "targets": ["Linear"]}},
+             "ignore": ignore, "quant_algo": "NVFP4", "producer": {"name": "modelopt", "version": "0.47.0"},
+             "quant_method": "modelopt"}
+    ckpt = out / "ckpt_nvfp4"
+    ckpt.mkdir(parents=True, exist_ok=True)
+    save_file({n: t.clone() for n, t in tensors.items()}, ckpt / "model.safetensors")  # scalar scales share storage
+    cfg = json.loads((out / "ckpt_bf16" / "config.json").read_text())
+    (ckpt / "config.json").write_text(json.dumps(cfg | {"quantization_config": quant}, indent=1))
+    (ckpt / "hf_quant_config.json").write_text(json.dumps({"producer": quant["producer"], "quantization": {
+        "quant_algo": "NVFP4", "kv_cache_quant_algo": None, "group_size": 16, "exclude_modules": ignore}}, indent=1))
+    torch.save(model.state_dict(), out / "ref_model_nvfp4.pt")
+
+    plain = [_run(model, ids) for ids in ps]
+    result = {"median_norm": [torch.cat([n[i] for _, n in plain]).median().item() for i in range(config.num_hidden_layers)],
+              "logprobs": {0: [lp for lp, _ in plain]}}
+    for slot in STEERS:
+        result["logprobs"][slot] = [_run(model, ids, pushes[slot])[0] for ids in ps]
+    model_bf16 = type(model)(config).eval().to(torch.bfloat16)
+    model_bf16.load_state_dict(model.state_dict())
+    for name, mod in model_bf16.named_modules():
+        if name.endswith("mlp.gate"):
+            mod.float()
+    result["logprobs_bf16"] = {s_: [_run(model_bf16, ids, pushes.get(s_, []))[0] for ids in ps] for s_ in [0, *STEERS]}
+    ref = json.loads((out / "ref.json").read_text())
+    (out / "ref.json").write_text(json.dumps(ref | {"nvfp4": result}))
+    print("ref nvfp4: median residual norm per layer", [round(m, 3) for m in result["median_norm"]])
+
+
 def _run(model, ids, pushes=()):
     """Reference logprobs of ids[1:] and per-layer residual norms (positions > 0), with pushes [(layer, delta)]."""
     norms, hooks = {}, []
@@ -103,10 +204,10 @@ def _pushes(out):
     return pushes
 
 
-def _load_ref_model(out):
+def _load_ref_model(out, name="ref_model.pt"):
     from transformers import BeamConfig, BeamForCausalLM
 
-    saved = torch.load(out / "ref_model.pt", weights_only=True)
+    saved = torch.load(out / name, weights_only=True)
     config = BeamConfig(**json.loads((out / "ckpt_bf16" / "config.json").read_text()))
     config._attn_implementation = "eager"
     model = BeamForCausalLM(config).float().eval()
@@ -116,11 +217,15 @@ def _load_ref_model(out):
 
 def teacher(out):
     """Teacher-force vLLM's greedy continuations through the reference and compare decode-step logprobs."""
-    model, pushes, ps = _load_ref_model(out), _pushes(out), prompts()
+    models = {"": _load_ref_model(out)}
+    if (out / "ref_model_nvfp4.pt").exists():
+        models["nvfp4"] = _load_ref_model(out, "ref_model_nvfp4.pt")
+    pushes, ps = _pushes(out), prompts()
     for tag in RUNS:
         path = out / f"vllm_{tag}.json"
         if not path.exists():
             continue
+        model = models["nvfp4" if tag.startswith("nvfp4") else ""]
         v = json.loads(path.read_text())
         line = []
         for slot in ["0", *map(str, STEERS)]:
@@ -212,14 +317,14 @@ def ref(out):
     print("ref: median residual norm per layer", [round(m, 3) for m in median])
 
 
-def vllm_run(out, kind, eager):
+def vllm_run(out, kind, eager, moe):
     sys.path.insert(0, str(pathlib.Path(__file__).parent))
     from vllm import LLM, SamplingParams
 
     from beam_steer import hist_quantiles
 
     llm = LLM(model=str(out / f"ckpt_{kind}"), skip_tokenizer_init=True, dtype="bfloat16", max_model_len=512,
-              gpu_memory_utilization=0.3, enforce_eager=eager, async_scheduling=False, moe_backend="triton",
+              gpu_memory_utilization=0.3, enforce_eager=eager, async_scheduling=False, moe_backend=moe or "triton",
               max_num_seqs=64, seed=SEED)
     print("steered rows loaded:", llm.collective_rpc("beam_steer_set", args=(str(out / "steer.pt"),)))
     ps = prompts()
@@ -247,7 +352,7 @@ def vllm_run(out, kind, eager):
     alone = llm.generate([{"prompt_token_ids": ids} for ids in ps], [params(0, max_tokens=1, prompt_logprobs=0)] * len(ps),
                          use_tqdm=False)
     alone = [[o.prompt_logprobs[t][ids[t]].logprob for t in range(1, len(ids))] for ids, o in zip(ps, alone)]
-    tag = f"{kind}_{'eager' if eager else 'graphs'}"
+    tag = f"{kind}{'-' + moe if moe else ''}_{'eager' if eager else 'graphs'}"
     (out / f"vllm_{tag}.json").write_text(json.dumps(
         {"median_norm": median, "logprobs": logprobs, "greedy": greedy, "greedy_logprobs": greedy_lp, "alone": alone,
          "device": torch.cuda.get_device_name(), "capability": torch.cuda.get_device_capability()}))
@@ -255,28 +360,28 @@ def vllm_run(out, kind, eager):
 
 
 # Held to the BF16 floor (the reference itself run in BF16 vs FP32) on mean |Δlogprob|; False = report only.
-RUNS = {"bf16_eager": True, "bf16_graphs": True, "fp8_graphs": False}
+RUNS = {"bf16_eager": True, "bf16_graphs": True, "fp8_graphs": False,
+        "nvfp4-marlin_graphs": True, "nvfp4-auto_graphs": False}
 
 
 def compare(out):
-    ref = json.loads((out / "ref.json").read_text())
-    plain = [np.array(x) for x in ref["logprobs"]["0"]]
+    refs = json.loads((out / "ref.json").read_text())
 
     def mad(xs, ys):
         return float(np.mean(np.concatenate([np.abs(np.array(a) - np.array(b)) for a, b in zip(xs, ys)])))
 
     ok = True
-    floor = {s_: mad(ref["logprobs_bf16"][s_], ref["logprobs"][s_]) for s_ in ref["logprobs"]}
-    print("reference in BF16 vs FP32, |Δ| per slot:", {k: round(x, 4) for k, x in floor.items()})
     for tag, tol in RUNS.items():
         path = out / f"vllm_{tag}.json"
         if not path.exists():
-            print(f"{tag}: missing")
-            ok = False
+            print(f"{tag}: not run")
             continue
+        ref = refs["nvfp4"] if tag.startswith("nvfp4") else refs
+        plain = [np.array(x) for x in ref["logprobs"]["0"]]
+        floor = {s_: mad(ref["logprobs_bf16"][s_], ref["logprobs"][s_]) for s_ in ref["logprobs"]}
         v = json.loads(path.read_text())
         print(f"== {tag} on {v['device']} sm{v['capability'][0]}{v['capability'][1]}"
-              + ("" if tol else "  (FP8 activations: informational)"))
+              + ("" if tol else "  (quantised activations: informational)"))
         ratio = np.array(v["median_norm"]) / np.array(ref["median_norm"])
         norms_ok = bool(np.all(np.abs(ratio - 1) < 0.15))  # histogram bins are 9% wide
         ok &= norms_ok
@@ -312,8 +417,10 @@ if __name__ == "__main__":
     out.mkdir(parents=True, exist_ok=True)
     if cmd == "ref":
         ref(out)
+        ref_nvfp4(out)
     elif cmd == "vllm":
-        vllm_run(out, sys.argv[3], eager="--eager" in sys.argv)
+        moe = sys.argv[sys.argv.index("--moe") + 1] if "--moe" in sys.argv else None
+        vllm_run(out, sys.argv[3], eager="--eager" in sys.argv, moe=moe)
     else:
         if cmd == "teacher":
             teacher(out)

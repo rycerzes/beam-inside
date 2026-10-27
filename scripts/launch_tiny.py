@@ -21,7 +21,8 @@ from huggingface_hub import HfApi
 IMAGE = "vllm/vllm-openai:nightly-5d35ce3934a7804b298559d2d99eec33792e1eb9"
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FILES = {"steer/beam_steer.py": "steer/beam_steer.py", "steer/pyproject.toml": "steer/pyproject.toml",
-         "scripts/vllm_tiny_check.py": "vllm_tiny_check.py", "meta/config.json": "out/real_config.json"}
+         "scripts/vllm_tiny_check.py": "vllm_tiny_check.py",
+         "scripts/session.py": "session.py", "meta/config.json": "out/real_config.json"}
 FLAVORS = {"cpu": ("cpu-basic", "20m"), "gpu": ("rtx-pro-6000", "45m")}
 
 mode = sys.argv[1]
@@ -49,11 +50,12 @@ echo PROBE DONE
 else:
     script += """nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total --format=csv
 export VLLM_USE_V2_MODEL_RUNNER=0
-for run in "bf16 --eager" "bf16" "fp8"; do
-  python3 vllm_tiny_check.py vllm out $run 2>&1 | grep -v "INFO" | tail -25 || true
+for run in "nvfp4 --moe marlin" "nvfp4 --moe auto"; do
+  python3 vllm_tiny_check.py vllm out $run 2>&1 | awk '!/INFO/ || /NvFp4|Marlin|marlin|backend/' | tail -30 || true
 done
 PYTHONPATH=$REF python3 vllm_tiny_check.py teacher out
-python3 vllm_tiny_check.py compare out
+python3 vllm_tiny_check.py compare out || true
+python3 session.py --model out/ckpt_nvfp4 --tiny --out run --moe-backend marlin --budget-min 15 2>&1 | grep -v "INFO" | tail -12
 """
 
 flavor, timeout = FLAVORS[mode]

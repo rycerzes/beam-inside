@@ -43,6 +43,8 @@ parser.add_argument("--out", required=True)
 parser.add_argument("--upload", help="private HF dataset repo for results, created if missing")
 parser.add_argument("--budget-min", type=float, default=150, help="no new phase or wave starts after this")
 parser.add_argument("--max-units", type=int, default=0)
+parser.add_argument("--moe-backend", default="triton", help="triton for FP8; marlin (W4A16) or auto (W4A4) for NVFP4")
+parser.add_argument("--kv-cache-dtype", default="auto")
 parser.add_argument("--tiny", action="store_true", help="tiny random checkpoint: token-id prompts, random units")
 args = parser.parse_args()
 T0 = time.time()
@@ -86,7 +88,8 @@ from beam_steer import hist_quantiles  # noqa: E402
 def main():
     log("loading", args.model)
     llm = LLM(model=args.model, tensor_parallel_size=args.tp, max_model_len=4096, gpu_memory_utilization=0.92,
-              async_scheduling=False, moe_backend="triton", max_num_seqs=512, seed=0, skip_tokenizer_init=args.tiny)
+              async_scheduling=False, moe_backend=args.moe_backend, max_num_seqs=512,
+              kv_cache_dtype=args.kv_cache_dtype, seed=0, skip_tokenizer_init=args.tiny)
     log("loaded")
     config = llm.model_config.hf_config
     H, NL = config.hidden_size, config.num_hidden_layers
