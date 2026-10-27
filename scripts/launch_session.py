@@ -5,7 +5,10 @@
 """Launch the steering session on HF Jobs.
 
     uv run scripts/launch_session.py rehearsal --repo USER/beam-steer-runs   # 1x rtx-pro-6000, tiny model, ~10 min
-    uv run scripts/launch_session.py real --repo USER/beam-steer-runs [--hours 3]  # 8x rtx-pro-6000, real Beam
+    uv run scripts/launch_session.py real --repo USER/beam-steer-runs [--variant nvfp4|fp8] [--hours 3]
+
+Variants: nvfp4 = the default NVFP4 checkpoint on 4x rtx-pro-6000, routed experts through Marlin (FP4 weights, BF16
+activations); fp8 = the FP8 checkpoint on 8x rtx-pro-6000 with the Triton MoE backend, as in the vLLM recipe.
 
 --repo is a private dataset repo (created private if missing). The real run downloads the sweep units from it and
 uploads every phase's results to it as they finish, so a timeout loses at most the wave in flight. The job timeout
@@ -24,13 +27,15 @@ from huggingface_hub import HfApi, get_token
 
 IMAGE = "vllm/vllm-openai:nightly-5d35ce3934a7804b298559d2d99eec33792e1eb9"
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-MODEL = "reflection/Beam-1.0-501B-A23B-FP8"
-PRICE = {"rtx-pro-6000": 2.75, "rtx-pro-6000x8": 22.0}
+VARIANTS = {"nvfp4": ("reflection/Beam-1.0-501B-A23B-NVFP4", "rtx-pro-6000x4", 4, "marlin"),
+            "fp8": ("reflection/Beam-1.0-501B-A23B-FP8", "rtx-pro-6000x8", 8, "triton")}
+PRICE = {"rtx-pro-6000": 2.75, "rtx-pro-6000x4": 11.0, "rtx-pro-6000x8": 22.0}
 
 parser = argparse.ArgumentParser()
 parser.add_argument("mode", choices=["rehearsal", "real"])
 parser.add_argument("--repo", required=True)
 parser.add_argument("--hours", type=float, default=3.0)
+parser.add_argument("--variant", choices=list(VARIANTS), default="nvfp4")
 args = parser.parse_args()
 api = HfApi()
 
@@ -61,12 +66,13 @@ PYTHONPATH=$REF python3 vllm_tiny_check.py ref out
 python3 session.py --model out/ckpt_bf16 --tiny --out run --upload REPO --budget-min 20
 """.replace("REPO", args.repo)
 else:
-    flavor, hours = "rtx-pro-6000x8", args.hours
+    model, flavor, tp, moe = VARIANTS[args.variant]
+    hours = args.hours
     for name in ("units.npz", "units.jsonl"):
         api.upload_file(path_or_fileobj=str(ROOT / "data/sweep" / name), path_in_repo=f"inputs/{name}",
                         repo_id=args.repo, repo_type="dataset")
     script = setup + f"""python3 -c "from huggingface_hub import snapshot_download as s; s('{args.repo}', repo_type='dataset', allow_patterns=['inputs/*'], local_dir='in')"
-python3 session.py --model {MODEL} --tp 8 --units in/inputs/units.npz --meta in/inputs/units.jsonl --out run \\
+python3 session.py --model {model} --tp {tp} --moe-backend {moe} --units in/inputs/units.npz --meta in/inputs/units.jsonl --out run \\
     --upload {args.repo} --budget-min {int(hours * 60 - 25)}
 """
 
@@ -76,5 +82,5 @@ job = api.run_job(image=IMAGE, command=["bash", "-c", script], flavor=flavor, ti
                   secrets={"HF_TOKEN": get_token()},
                   env={"VLLM_USE_V2_MODEL_RUNNER": "0", "HF_XET_HIGH_PERFORMANCE": "1", "PYTHONUNBUFFERED": "1",
                        "HF_HUB_DISABLE_PROGRESS_BARS": "1"},
-                  name=f"beam-steer-{args.mode}")
+                  name=f"beam-steer-{args.mode}" + (f"-{args.variant}" if args.mode == "real" else ""))
 print(job.id, job.url)
