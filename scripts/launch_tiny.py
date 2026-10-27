@@ -49,8 +49,10 @@ echo PROBE DONE
 else:
     script += """nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total --format=csv
 export VLLM_USE_V2_MODEL_RUNNER=0
-python3 vllm_tiny_check.py vllm out --eager 2>&1 | grep -v "^INFO" | tail -40 || true
-python3 vllm_tiny_check.py vllm out 2>&1 | grep -v "^INFO" | tail -40 || true
+for run in "bf16 --eager" "bf16" "fp8"; do
+  python3 vllm_tiny_check.py vllm out $run 2>&1 | grep -v "INFO" | tail -25 || true
+done
+PYTHONPATH=$REF python3 vllm_tiny_check.py teacher out
 python3 vllm_tiny_check.py compare out
 """
 
