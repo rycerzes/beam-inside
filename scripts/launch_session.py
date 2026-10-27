@@ -74,6 +74,7 @@ minutes = int(hours * 60)
 print(f"{flavor} for at most {minutes} min = ${PRICE[flavor] * hours:.2f} cap")
 job = api.run_job(image=IMAGE, command=["bash", "-c", script], flavor=flavor, timeout=f"{minutes}m",
                   secrets={"HF_TOKEN": get_token()},
-                  env={"VLLM_USE_V2_MODEL_RUNNER": "0", "HF_XET_HIGH_PERFORMANCE": "1", "PYTHONUNBUFFERED": "1"},
+                  env={"VLLM_USE_V2_MODEL_RUNNER": "0", "HF_XET_HIGH_PERFORMANCE": "1", "PYTHONUNBUFFERED": "1",
+                       "HF_HUB_DISABLE_PROGRESS_BARS": "1"},
                   name=f"beam-steer-{args.mode}")
 print(job.id, job.url)
