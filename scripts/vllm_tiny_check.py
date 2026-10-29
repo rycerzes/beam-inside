@@ -23,6 +23,9 @@ Steering slots: 1 pushes the residual leaving dense layer 1, 2 the one leaving M
 Each push is 0.8 x the reference median residual norm leaving that layer, along a fixed random direction.
 Routing: slot 4 adds router logit deltas only: at every MoE layer it forces the two least-used experts in (+8) and
 bans the two most-used (-30), applied inside the reference router before its grouped top-k.
+Bias ban (beam_steer_set_bias, the whole batch): at every MoE layer, the two most-used experts of each routing
+group get correction bias -1000, as REAP's per-group pruning does; held to the reference with the same bias, then
+the bias is restored and the unsteered prompts must match their earlier logprobs exactly.
 Variants: 2w is slot 2 steered on positions 20-59 only, 3s is slot 3 skipping a set of token ids; each is held to its
 own masked reference. Capture: residuals leaving every layer and MoE router logits at five positions of each prompt
 (first, sixth, last, and the first two fed-back generated tokens), unsteered and under slot 3, with the prefill
@@ -72,6 +75,7 @@ def prompts():
 SKIP_IDS = sorted({ids[t] for ids in prompts() for t in range(2, min(40, len(ids)), 4)})
 VARIANTS = {"2w": (2, {"steer_from": 20, "steer_until": 60}), "3s": (3, {"steer_skip_ids": SKIP_IDS})}
 ROUTE_SLOT = 4
+BAN_DELTA = -1000.0
 CASES = {"0": (0, {}), **{str(s): (s, {}) for s in STEERS}, "4r": (ROUTE_SLOT, {}), **VARIANTS}  # key -> (slot, extra_args)
 CAPTURE_SLOTS = (0, 3, ROUTE_SLOT)
 
@@ -210,7 +214,7 @@ def ref_nvfp4(out):
 
     plain = [_run(model, ids) for ids in ps]
     result = {"median_norm": [torch.cat([n[i] for _, n in plain]).median().item() for i in range(config.num_hidden_layers)],
-              **_case_refs(model, pushes, ps, _routes(out))}
+              **_case_refs(model, pushes, ps, _routes(out), _bans(out))}
     ref = json.loads((out / "ref.json").read_text())
     (out / "ref.json").write_text(json.dumps(ref | {"nvfp4": result}))
     print("ref nvfp4: median residual norm per layer", [round(m, 3) for m in result["median_norm"]])
@@ -277,11 +281,30 @@ def _run(model, ids, pushes=(), mask=None, keep=False, routes=()):
     return lp.tolist(), norms
 
 
-def _case_refs(model, pushes, ps, routes):
-    """Reference prompt logprobs for every case, in float32 and in BF16 (the floor)."""
+def _ban_logprobs(model, ps, bans):
+    """Unsteered reference logprobs with the bias ban [(layer, expert, delta)] applied, then the bias restored."""
+    saved = {L: model.model.layers[L].mlp.gate.e_score_correction_bias.detach().clone() for L, _, _ in bans}
+    with torch.no_grad():
+        for L, e, d in bans:
+            model.model.layers[L].mlp.gate.e_score_correction_bias[e] += d
+    try:
+        return [_run(model, ids)[0] for ids in ps]
+    finally:
+        with torch.no_grad():
+            for L, b in saved.items():
+                model.model.layers[L].mlp.gate.e_score_correction_bias.copy_(b)
+
+
+def _case_refs(model, pushes, ps, routes, bans):
+    """Reference prompt logprobs for every case and the bias ban, in float32 and in BF16 (the floor)."""
     model_bf16 = _bf16(model)
     return {"logprobs": {k: [_case_logprobs(model, ids, pushes, k, routes) for ids in ps] for k in CASES},
-            "logprobs_bf16": {k: [_case_logprobs(model_bf16, ids, pushes, k, routes) for ids in ps] for k in CASES}}
+            "logprobs_bf16": {k: [_case_logprobs(model_bf16, ids, pushes, k, routes) for ids in ps] for k in CASES},
+            "ban": _ban_logprobs(model, ps, bans), "ban_bf16": _ban_logprobs(model_bf16, ps, bans)}
+
+
+def _bans(out):
+    return [(L, e, d) for L, e, d in torch.load(out / "ban.pt", weights_only=True)]
 
 
 def _routes(out):
@@ -478,7 +501,12 @@ def ref(out):
     by_use = {L: sorted(range(config.num_experts), key=lambda e: use.get((L, e), 0)) for L in moe}
     torch.save([(ROUTE_SLOT, L, e, 8.0) for L in moe for e in by_use[L][:2]]
                + [(ROUTE_SLOT, L, e, -30.0) for L in moe for e in by_use[L][-2:]], out / "steer_route.pt")
-    result = {"median_norm": median, **_case_refs(model, pushes, ps, _routes(out))}
+    # Bias ban: the two most-used experts of every routing group, at every MoE layer (half the experts, as REAP).
+    per = config.num_experts // config.n_group
+    torch.save([(L, e, BAN_DELTA) for L in moe for g in range(config.n_group)
+                for e in sorted(range(g * per, (g + 1) * per), key=lambda e: use.get((L, e), 0))[-per // 2:]],
+               out / "ban.pt")
+    result = {"median_norm": median, **_case_refs(model, pushes, ps, _routes(out), _bans(out))}
     (out / "ref.json").write_text(json.dumps({"prompts": ps, **result}))
     print("ref: median residual norm per layer", [round(m, 3) for m in median])
 
@@ -527,11 +555,22 @@ def vllm_run(out, kind, eager, moe):
     alone = llm.generate([{"prompt_token_ids": ids} for ids in ps], [params(0, max_tokens=1, prompt_logprobs=0)] * len(ps),
                          use_tqdm=False)
     alone = [[o.prompt_logprobs[t][ids[t]].logprob for t in range(1, len(ids))] for ids, o in zip(ps, alone)]
+
+    def plain_logprobs():
+        outs = llm.generate([{"prompt_token_ids": ids} for ids in ps], [params(0, max_tokens=1, prompt_logprobs=0)] * len(ps),
+                            use_tqdm=False)
+        return [[o.prompt_logprobs[t][ids[t]].logprob for t in range(1, len(ids))] for ids, o in zip(ps, outs)]
+
+    # The bias ban, for the whole batch; then the bias restored, and the same prompts again.
+    print("bias entries banned:", llm.collective_rpc("beam_steer_set_bias", args=(str(out / "ban.pt"),)))
+    banned = plain_logprobs()
+    print("bias layers restored:", llm.collective_rpc("beam_steer_reset_bias"))
+    after_reset = plain_logprobs()
     tag = f"{kind}{'-' + moe if moe else ''}_{'eager' if eager else 'graphs'}"
     print("captured rows, dropped:", llm.collective_rpc("beam_steer_capture_dump", args=(str(out / f"capture_{tag}.pt"),)))
     (out / f"vllm_{tag}.json").write_text(json.dumps(
         {"median_norm": median, "logprobs": logprobs, "greedy": greedy, "greedy_logprobs": greedy_lp, "alone": alone,
-         "capture_gen": capture_gen,
+         "capture_gen": capture_gen, "ban": banned, "after_reset": after_reset,
          "device": torch.cuda.get_device_name(), "capability": torch.cuda.get_device_capability()}))
     print(f"vllm {tag}: median residual norm per layer", [round(m, 3) for m in median])
 
@@ -590,6 +629,17 @@ def compare(out):
         leak_ok = not tol or leak < 1e-3
         ok &= leak_ok
         print(f"  unsteered alone vs in mixed batch: max |Δ| {leak:.4f}  {'ok' if leak_ok else 'FAIL'}")
+        if "ban" in v and "ban" in ref:
+            match, floor_ban = mad(v["ban"], ref["ban"]), mad(ref["ban_bf16"], ref["ban"])
+            effect = mad(v["ban"], ref["logprobs"]["0"])
+            restored = max(float(np.max(np.abs(np.array(a) - np.array(b)))) for a, b in zip(v["after_reset"], v["alone"]))
+            ban_ok = (not tol or match < floor_ban) and effect > 5 * match and restored < 1e-3
+            ok &= ban_ok
+            print(f"  bias ban: |Δ| vs its ref {match:.4f} (BF16 floor {floor_ban:.4f}), vs unbanned ref {effect:.4f}; "
+                  f"after reset vs before: max |Δ| {restored:.4f}  {'ok' if ban_ok else 'FAIL'}")
+        else:
+            ok = False
+            print("  bias ban: missing from the run or the reference  FAIL")
     paths = [out / f"vllm_bf16_{m}.json" for m in ("eager", "graphs")]
     if all(p.exists() for p in paths):
         e, g = (json.loads(p.read_text())["greedy"] for p in paths)
