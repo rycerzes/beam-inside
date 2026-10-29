@@ -12,6 +12,11 @@ input computed from the steered residual.
 
 A slot can also steer routing: per MoE layer, a logit delta per expert, added to the router's logits before
 Beam's grouped top-k (a large positive delta forces an expert in, a large negative one bans it, after SteerMoE).
+Beam chooses experts by sigmoid(logit) + e_score_correction_bias, and the bias is ~18-28 with a spread of at most
+0.02 across a layer's experts, so a logit ban only holds when every kept candidate scores above that spread. An
+exact ban instead lowers the banned experts' correction bias (`beam_steer_set_bias`): the bias enters only the
+choice, never the routing weights, so this is what slicing the experts out of the router does (as REAP does). The
+bias is shared by every request, so a bias ban applies to the whole batch until `beam_steer_reset_bias`.
 
 Per-request keys in `extra_args`:
   steer_slot       slot whose vectors and router deltas apply (default 0, none)
@@ -28,8 +33,8 @@ enable_prefix_caching=False.
 
 Buffers are persistent and indexed in-graph, so CUDA graphs stay valid; the model runner writes each step's
 per-token slots and capture indices before the forward. Workers gain RPCs for `LLM.collective_rpc`:
-`beam_steer_set(path)`, `beam_steer_set_route(path)`, `beam_steer_stats()`, `beam_steer_reset_stats()` and
-`beam_steer_capture_dump(path)`.
+`beam_steer_set(path)`, `beam_steer_set_route(path)`, `beam_steer_set_bias(path)`, `beam_steer_reset_bias()`,
+`beam_steer_stats()`, `beam_steer_reset_stats()` and `beam_steer_capture_dump(path)`.
 
 Environment: BEAM_STEER_SLOTS (default 512), BEAM_STEER_CAPTURE_ROWS (rows held between dumps, default 0 = capture
 off; each row costs layers x hidden x 2 bytes plus layers x experts x 4), BEAM_STEER_CAPTURE_PER_STEP (default 1024).
@@ -61,6 +66,7 @@ class _State:
     cap_rows = 0  # rows filled since the last dump
     cap_index = []  # per filled row: (capture_key, position, token_id, slot steering that token)
     cap_dropped = 0  # captures lost to a full buffer
+    bias_orig = {}  # MoE layer -> its correction bias before beam_steer_set_bias
 
 
 STATE = _State()
@@ -253,6 +259,32 @@ def _patch_worker():
         torch.cuda.synchronize()
         return int((STATE.route != 0).sum())
 
+    def beam_steer_set_bias(self, path):
+        """Load [(layer, expert, delta)] from a torch file; delta is added in place to that expert's routing
+        correction bias for every request until beam_steer_reset_bias (a set first restores the original bias).
+        In place, so the router (which holds the same tensor) and captured CUDA graphs see it."""
+        beam_steer_reset_bias(self)
+        layers = self.model_runner.get_model().model.layers
+        n = 0
+        for layer, expert, delta in torch.load(path, weights_only=True):
+            bias = layers[layer].mlp.gate.e_score_correction_bias
+            if layer not in STATE.bias_orig:
+                STATE.bias_orig[layer] = bias.detach().clone()
+            bias.data[expert] += float(delta)
+            n += 1
+        torch.cuda.synchronize()
+        return n
+
+    def beam_steer_reset_bias(self):
+        """Restore every correction bias changed by beam_steer_set_bias; returns the layers restored."""
+        layers = self.model_runner.get_model().model.layers
+        for layer, orig in STATE.bias_orig.items():
+            layers[layer].mlp.gate.e_score_correction_bias.data.copy_(orig)
+        n = len(STATE.bias_orig)
+        STATE.bias_orig = {}
+        torch.cuda.synchronize()
+        return n
+
     def beam_steer_stats(self):
         return STATE.hist.cpu().tolist()
 
@@ -276,6 +308,8 @@ def _patch_worker():
 
     Worker.beam_steer_set = beam_steer_set
     Worker.beam_steer_set_route = beam_steer_set_route
+    Worker.beam_steer_set_bias = beam_steer_set_bias
+    Worker.beam_steer_reset_bias = beam_steer_reset_bias
     Worker.beam_steer_stats = beam_steer_stats
     Worker.beam_steer_reset_stats = beam_steer_reset_stats
     Worker.beam_steer_capture_dump = beam_steer_capture_dump
