@@ -76,10 +76,15 @@ else:
         if "sweep" in args.phases or "effort2" in src:
             api.upload_file(path_or_fileobj=str(ROOT / src), path_in_repo=f"inputs/{pathlib.Path(src).name}",
                             repo_id=args.repo, repo_type="dataset")
+    mmlu = ""
+    if "mmlu" in args.phases.split(","):  # scripts/mmlu_arms.py
+        api.upload_file(path_or_fileobj=str(ROOT / "data/mmlu/arms.json"), path_in_repo="inputs/mmlu_arms.json",
+                        repo_id=args.repo, repo_type="dataset")
+        mmlu = "--mmlu-arms in/inputs/mmlu_arms.json"
     script = setup + f"""python3 -c "from huggingface_hub import snapshot_download as s; s('{args.repo}', repo_type='dataset', allow_patterns=['inputs/*'], local_dir='in')"
 python3 session.py --model {model} --tp {tp} --moe-backend {moe} --units in/inputs/units.npz --meta in/inputs/units.jsonl --out run \\
     --upload {args.repo} --budget-min {int(hours * 60 - 25)} --phases {args.phases} \\
-    --effort2-inputs in/inputs/inputs.pt {args.session_args}
+    --effort2-inputs in/inputs/inputs.pt {mmlu} {args.session_args}
 """
     capture_rows = 4096  # ~2.4 GB per GPU at Beam's size: 91 questions x 9 efforts x 5 positions per dump
 

@@ -5,7 +5,8 @@
 """Launch the beam_steer tiny-model check on HF Jobs, shipping the files inside the command (nothing is uploaded).
 
     uv run scripts/launch_tiny.py cpu   # cpu-basic: image entrypoint, plugin import, reference build
-    uv run scripts/launch_tiny.py gpu   # rtx-pro-6000: full check (BF16 eager / graphs, NVFP4 Marlin), capture, session
+    uv run scripts/launch_tiny.py gpu [PHASES]   # rtx-pro-6000: full check (BF16 eager / graphs, NVFP4 Marlin),
+                                                 # capture, then a tiny session with PHASES (comma list)
 
 No secrets are passed: the tiny model is built inside the job, so nothing gated is downloaded.
 """
@@ -26,6 +27,7 @@ FILES = {"steer/beam_steer.py": "steer/beam_steer.py", "steer/pyproject.toml": "
 FLAVORS = {"cpu": ("cpu-basic", "20m"), "gpu": ("rtx-pro-6000", "30m")}
 
 mode = sys.argv[1]
+phases = sys.argv[2] if len(sys.argv) > 2 else "sanity,stats,calib,effort,sweep"
 buf = io.BytesIO()
 with tarfile.open(fileobj=buf, mode="w:gz") as tar:
     for src, dst in FILES.items():
@@ -57,8 +59,8 @@ PYTHONPATH=$REF python3 vllm_tiny_check.py teacher out
 PYTHONPATH=$REF python3 vllm_tiny_check.py capture out || true
 python3 vllm_tiny_check.py compare out || true
 BEAM_STEER_CAPTURE_ROWS=256 python3 session.py --model out/ckpt_nvfp4 --tiny --out run --moe-backend marlin --budget-min 15 \\
-    --max-model-len 1024 --effort-questions 12 --effort-gen-questions 6 2>&1 | grep -v "INFO" | tail -30
-"""
+    --max-model-len 1024 --effort-questions 12 --effort-gen-questions 6 --phases PHASES 2>&1 | grep -v "INFO" | tail -30
+""".replace("PHASES", phases)
 
 flavor, timeout = FLAVORS[mode]
 job = HfApi().run_job(image=IMAGE, command=["bash", "-c", script], flavor=flavor, timeout=timeout,
