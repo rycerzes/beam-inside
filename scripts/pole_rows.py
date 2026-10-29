@@ -5,9 +5,9 @@
 
     uv run scripts/pole_rows.py RUN_DIR KEY.jsonl OUT_DIR
     -> OUT_DIR/poles.jsonl ({"id": "L{layer}_E{expert}_{pole}", "layer", "expert", "pole", "label"})
-       OUT_DIR/ids.txt (pole ids: judge-set poles from KEY first, in KEY order, then the rest of layers 24-51, then
-       layers 0-23, each by layer and expert, so a spend cap cuts the early layers, whose labels don't predict
-       steering, rather than the late ones)
+       OUT_DIR/ids.txt (pole ids: judge-set poles from KEY first, in KEY order, then the rest of layers 24-51 by
+       layer, then layers 23 down to 0, so a spend cap cuts the earliest layers, whose labels don't predict steering,
+       first)
 
 The label is the one judge_items.py shows a judge (first 12 lens tokens, decoded), so a pole's Beam label can stand
 in for its token label in the three-way test.
@@ -37,7 +37,7 @@ judged = [f"L{k['layer']}_E{k['expert']}_{k['pole']}" for k in map(json.loads, o
 missing = [p for p in judged if p not in rows]
 assert not missing, f"{len(missing)} judge-set poles are not testable rows, e.g. {missing[:3]}"
 order = list(dict.fromkeys(judged)) + sorted(set(rows) - set(judged), key=lambda p: (
-    rows[p]["layer"] < 24, rows[p]["layer"], rows[p]["expert"], p))
+    rows[p]["layer"] < 24, rows[p]["layer"] if rows[p]["layer"] >= 24 else -rows[p]["layer"], rows[p]["expert"], p))
 args.out.mkdir(parents=True, exist_ok=True)
 with open(args.out / "poles.jsonl", "w") as f:
     for p in order:
