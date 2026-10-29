@@ -16,6 +16,9 @@ words its pushes made Beam say, for the topical categories). Categories were fix
   common keywords)
 - health / law / history (exploratory, keyword stems): >= 2 distinct stems among lens + steered-theme words
 
+With --beam-labels (self_label.py on pole_rows.py rows), each expert also gets the subjects Beam gave its coherent
+poles, and every subject is tested the same way.
+
 Kept rate per category against a null that shuffles `kept` within each (layer, group) block, which preserves REAP's
 exact 16-of-32 constraint. Also the within-layer rank correlation of REAP saliency with each token fraction.
 """
@@ -34,6 +37,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("run", type=pathlib.Path)
 parser.add_argument("reap", type=pathlib.Path)
 parser.add_argument("--verdicts", type=pathlib.Path, help="judge verdicts (judge_score.py --out) for a trusted subset")
+parser.add_argument("--beam-labels", type=pathlib.Path, help="Beam's pole labels with subjects (self_label.py)")
 parser.add_argument("--shuffles", type=int, default=10000)
 parser.add_argument("--out", type=pathlib.Path)
 args = parser.parse_args()
@@ -125,6 +129,16 @@ for i, k in enumerate(keys):
     for c in labels:
         cats[c].append(i)
 frac_nonlatin, frac_code = np.array(frac_nonlatin), np.array(frac_code)
+beam_subjects = collections.defaultdict(list)
+if args.beam_labels:
+    by_expert = collections.defaultdict(set)
+    for r in map(json.loads, open(args.beam_labels)):
+        if r["name"] and r.get("coherent") is True and r.get("subject"):
+            L, E, _ = r["id"].split("_")
+            by_expert[(int(L[1:]), int(E[1:]))].add(r["subject"])
+    for i, k in enumerate(keys):
+        for subject in by_expert.get(k, ()):
+            beam_subjects[subject].append(i)
 
 trusted = None
 if args.verdicts:
@@ -182,6 +196,13 @@ for c in ("multilingual", "code", "health", "law", "history"):
         report["trusted"][c] = t
         if t:
             print(f"  trusted only {t['n']:5d} {t['kept']:6.1%} {t['null_mean']:6.1%}  {t['p_two_sided']}")
+if beam_subjects:
+    report["beam_subjects"] = {}
+    print("by Beam's subject (coherent poles):")
+    for c, idx in sorted(beam_subjects.items(), key=lambda kv: -len(kv[1])):
+        res = test(idx)
+        report["beam_subjects"][c] = res
+        print(f"  {c:20s} {res['n']:5d} {res['kept']:6.1%} {res['null_mean']:6.1%}  {res['p_two_sided']}")
 by_band = {}
 for c in ("multilingual", "code"):
     by_band[c] = {f"L{8 * b}-{8 * b + 7}": test([i for i in cats[c] if layer[i] // 8 == b]) for b in range(7)}
