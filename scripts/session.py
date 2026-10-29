@@ -33,6 +33,13 @@ Phases (--phases, default all), each written to OUT and uploaded (if --upload) a
             route_ctrl_prompt / swap_ctrl  controls for the gentle arms: route_ctrl on the prompt only; a random
                             vector of the swap's norm at the effort digit (--effort2-arms runs a subset, no capture)
           Interventions come from --effort2-inputs (scripts/effort2_inputs.py on a session with the effort phase)
+  mmlu    MMLU-Pro test (12,032 questions), no thinking: the analysis channel is closed in the prompt and the
+          final answer opened at "The answer is (", then one token restricted to the option letters, whose
+          processed logprobs (normalised over the letters) give the prediction and the correct letter's logprob.
+          Arms from --mmlu-arms (scripts/mmlu_arms.py), each a set of (layer, expert) banned for the whole batch
+          through the routing correction bias, run in file order and saved one by one (no arm starts after
+          --budget-min); the first arm is unbanned, and a real run stops if its accuracy is under --mmlu-gate.
+          Last, the unbanned arm again on the first --mmlu-restore questions: it must reproduce the first run
   sweep   every unit at doses (+0.4 τ*, +τ*, -τ*) on prompts who / snake / orange (greedy, 160 tokens), at (+τ*, -τ*)
           on an effort prompt (reasoning effort 32, 512 tokens), and the unit's own ΔNLL on two calib texts.
           Waves of 170 units; a wave is the unit of saving, and no wave starts after --budget-min
@@ -61,7 +68,9 @@ EFFORT_PROMPT = ("A bat and a ball cost $1.10 in total. The bat costs $1.00 more
 SANITY = ["What is the capital of France? Answer in one word.", *PROMPTS.values()]
 SLOTS = int(os.environ.get("BEAM_STEER_SLOTS", "512"))
 CAPTURE_ROWS = int(os.environ.get("BEAM_STEER_CAPTURE_ROWS", "0"))
-PHASES = ("sanity", "stats", "calib", "effort", "effort2", "sweep")
+PHASES = ("sanity", "mmlu", "stats", "calib", "effort", "effort2", "sweep")
+MMLU_PREFIX = "<|channel|>analysis<|message|>I'll answer directly.<|end|><|start|>assistant<|channel|>final<|message|>The answer is ("
+MMLU_BAN = -1000.0
 
 CALIB_DOSES, CALIB_DIRS = (0.05, 0.1, 0.2, 0.35, 0.5, 0.8, 1.2), 8
 SWEEP_TAUS = (0.4, 1.0, -1.0)  # fractions of τ*; the sign is the pole
@@ -85,6 +94,10 @@ parser.add_argument("--effort2-inputs", help="interventions from scripts/effort2
 parser.add_argument("--effort2-problems", type=int, default=100)
 parser.add_argument("--effort2-max-tokens", type=int, default=12000)
 parser.add_argument("--effort2-arms", default="", help="comma list: run only these arms, two at a time, in this order")
+parser.add_argument("--mmlu-arms", help="JSON from scripts/mmlu_arms.py (a small random set on --tiny)")
+parser.add_argument("--mmlu-limit", type=int, default=0, help="first N questions only (0 = all)")
+parser.add_argument("--mmlu-gate", type=float, default=0.3, help="stop a real run if the unbanned accuracy is lower")
+parser.add_argument("--mmlu-restore", type=int, default=500)
 parser.add_argument("--max-units", type=int, default=0)
 parser.add_argument("--effort-questions", type=int, default=200, help="questions captured at every effort")
 parser.add_argument("--effort-gen-questions", type=int, default=100, help="questions answered for the dial and probe")
@@ -161,7 +174,9 @@ def main():
     llm = LLM(model=args.model, tensor_parallel_size=args.tp, max_model_len=args.max_model_len,
               gpu_memory_utilization=0.92, async_scheduling=False, moe_backend=args.moe_backend, max_num_seqs=512,
               max_num_batched_tokens=4096, enable_prefix_caching=False, kv_cache_dtype=args.kv_cache_dtype, seed=0,
-              skip_tokenizer_init=args.tiny)
+              skip_tokenizer_init=args.tiny,
+              # the letters' logprobs after the allowed-token mask, i.e. normalised over the options (mmlu only)
+              **({"logprobs_mode": "processed_logprobs"} if "mmlu" in phases else {}))
     log("loaded")
     config = llm.model_config.hf_config
     H, NL = config.hidden_size, config.num_hidden_layers
@@ -248,6 +263,13 @@ def main():
         if not args.tiny and not any("paris" in r["text"].lower() for r in rows[:1]):
             log("ABORT: the real model did not answer Paris; not spending on a broken engine")
             sys.exit(2)
+
+    # --- mmlu ---------------------------------------------------------------------------------------------------------
+    if "mmlu" in phases:
+        run_mmlu(llm, config, tok, chat)
+        if phases <= {"sanity", "mmlu"}:
+            log("SESSION DONE")
+            return
 
     # --- stats (always: every dose is written in units of the median) ------------------------------------------------
     if args.tiny:
@@ -628,6 +650,123 @@ def effort_directions(kind_index, positions):
         r2.append(float(1 - ((y[~train] - pred) ** 2).sum() / max(((y[~train] - y[~train].mean()) ** 2).sum(), 1e-12)))
     return {"r": r, "r2": r2}
 
+
+
+def mmlu_questions(config, tok, chat):
+    """[{id, category, answer, n, prompt}] and the option letters' token ids."""
+    if args.tiny:  # random token prompts standing in for questions
+        g, cats = np.random.default_rng(7), ("math", "health", "law", "biology", "history", "other")
+        qs = [{"id": i, "category": cats[i % len(cats)], "answer": int(g.integers(0, 10)), "n": 10,
+               "prompt": g.integers(0, config.vocab_size, int(g.integers(60, 200))).tolist()}
+              for i in range(args.mmlu_limit or 120)]
+        return qs, list(range(32, 42))
+    import pyarrow.parquet as pq
+    from huggingface_hub import hf_hub_download
+
+    letters = [tok.convert_tokens_to_ids(c) for c in "ABCDEFGHIJ"]
+    assert len(set(letters)) == 10 and all(tok.convert_ids_to_tokens(i) == c for i, c in zip(letters, "ABCDEFGHIJ"))
+    prefix = tok.encode(MMLU_PREFIX, add_special_tokens=False)
+    rows = pq.read_table(hf_hub_download("TIGER-Lab/MMLU-Pro", "data/test-00000-of-00001.parquet",
+                                         repo_type="dataset")).to_pylist()
+    qs = []
+    for r in rows[: args.mmlu_limit or None]:
+        text = (r["question"] + "\n" + "\n".join(f"({'ABCDEFGHIJ'[i]}) {o}" for i, o in enumerate(r["options"]))
+                + "\nAnswer with the letter only.")
+        qs.append({"id": r["question_id"], "category": r["category"], "answer": r["answer_index"],
+                   "n": len(r["options"]), "prompt": chat(text, 8) + prefix})
+    return qs, letters
+
+
+def run_mmlu(llm, config, tok, chat):
+    qs, letters = mmlu_questions(config, tok, chat)
+    moe = [i for i, t in enumerate(config.mlp_layer_types) if t == "sparse"]
+    if args.mmlu_arms:
+        arms = json.loads(pathlib.Path(args.mmlu_arms).read_text())["arms"]
+    else:  # tiny: unbanned, half of every group at every MoE layer, one expert per layer, and its random control
+        assert args.tiny, "a real run needs --mmlu-arms"
+        g, per = np.random.default_rng(3), config.num_experts // config.n_group
+        half = [[L, e] for L in moe for k in range(config.n_group) for e in range(k * per, k * per + per // 2)]
+        arms = [{"name": "base", "bans": []}, {"name": "half", "bans": half},
+                {"name": "one", "bans": [[L, 0] for L in moe]},
+                {"name": "one_ctrl", "bans": [[L, int(g.integers(1, config.num_experts))] for L in moe]}]
+    assert arms[0]["bans"] == [], "the first arm must be unbanned (gate and restore check)"
+    # Every routing group must keep enough experts for the grouped top-k to pick top_k unbanned ones.
+    need = -(-config.num_experts_per_tok // config.topk_group)
+    per = config.num_experts // config.n_group
+    for arm in arms:
+        banned = {}
+        for L, e in arm["bans"]:
+            assert L in moe and 0 <= e < config.num_experts, (arm["name"], L, e)
+            banned.setdefault((L, e // per), set()).add(e)
+        worst = min((per - len(v) for v in banned.values()), default=per)
+        assert worst >= need, f"arm {arm['name']}: a group keeps {worst} experts, top-k needs {need}"
+    log(f"mmlu: {len(qs)} questions, {sum(len(q['prompt']) for q in qs)} prompt tokens per arm, arms",
+        [(a["name"], len(a["bans"])) for a in arms])
+
+    def score(subset):
+        params = [SamplingParams(temperature=0, max_tokens=1, detokenize=False, logprobs=10,
+                                 allowed_token_ids=letters[: q["n"]], extra_args={"steer_slot": 0}) for q in subset]
+        t = time.time()
+        outs = llm.generate([{"prompt_token_ids": q["prompt"]} for q in subset], params, use_tqdm=False)
+        tps = sum(len(q["prompt"]) for q in subset) / (time.time() - t)
+        rows = []
+        for q, o in zip(subset, outs):
+            lp = o.outputs[0].logprobs[0]
+            lps = [lp[t].logprob if t in lp else float("-inf") for t in letters[: q["n"]]]
+            rows.append({"id": q["id"], "category": q["category"], "answer": q["answer"], "pred": int(np.argmax(lps)),
+                         "sampled": letters.index(o.outputs[0].token_ids[0]), "lp": [round(x, 4) for x in lps],
+                         "mass": round(float(np.exp(lps).sum()), 4)})
+        return rows, tps
+
+    def summary(rows):
+        acc = float(np.mean([r["pred"] == r["answer"] for r in rows]))
+        by = {}
+        for r in rows:
+            by.setdefault(r["category"], []).append(r)
+        return {"acc": round(acc, 4), "lp_correct": round(float(np.mean([r["lp"][r["answer"]] for r in rows])), 4),
+                "mass_min": min(r["mass"] for r in rows), "sampled_is_pred": float(np.mean([r["sampled"] == r["pred"]
+                                                                                             for r in rows])),
+                "by_category": {c: {"n": len(v), "acc": round(float(np.mean([r["pred"] == r["answer"] for r in v])), 4),
+                                    "lp_correct": round(float(np.mean([r["lp"][r["answer"]] for r in v])), 4)}
+                                for c, v in sorted(by.items())}}
+
+    results, base_rows = {}, None
+    for arm in arms:
+        if over_budget():
+            log(f"mmlu: budget reached, arm {arm['name']} and later not run")
+            break
+        bans = [(L, e, MMLU_BAN) for L, e in arm["bans"]]
+        if bans:
+            path = OUT / "mmlu_bias.pt"
+            torch.save(bans, path)
+            set_counts = llm.collective_rpc("beam_steer_set_bias", args=(str(path),))
+            assert all(c == len(bans) for c in set_counts), set_counts
+        try:
+            rows, tps = score(qs)
+        finally:
+            if bans:
+                llm.collective_rpc("beam_steer_reset_bias")
+        save(f"mmlu_{arm['name']}.jsonl.gz", rows)
+        results[arm["name"]] = {"bans": len(bans), "tok_per_s": round(tps), **summary(rows)}
+        save_json("mmlu_summary.json", results)
+        r = results[arm["name"]]
+        log(f"mmlu {arm['name']:14s} bans {len(bans):5d}  acc {r['acc']:.3f}  lp(correct) {r['lp_correct']:.3f}  "
+            f"letter mass min {r['mass_min']:.4f}  sampled==argmax {r['sampled_is_pred']:.3f}  at {tps:.0f} tok/s")
+        if base_rows is None:
+            base_rows = rows
+            if not args.tiny and r["acc"] < args.mmlu_gate:
+                log(f"ABORT: unbanned accuracy {r['acc']:.3f} < gate {args.mmlu_gate}; not spending on the arms")
+                sys.exit(3)
+    n = min(args.mmlu_restore, len(qs))
+    again, _ = score(qs[:n])
+    # A smaller batch than the first run: kernels may differ by batch noise (Marlin ~0.01 on the tiny model); a bias
+    # left banned would move the letters by far more.
+    d = [abs(a - b) for x, y in zip(again, base_rows[:n]) for a, b in zip(x["lp"], y["lp"]) if np.isfinite(a) and np.isfinite(b)]
+    same = float(np.mean([x["pred"] == y["pred"] for x, y in zip(again, base_rows[:n])]))
+    save_json("mmlu_restore.json", {"n": n, "max_abs_lp_diff": max(d), "mean_abs_lp_diff": float(np.mean(d)),
+                                    "pred_agreement": same})
+    log(f"mmlu restore check: unbanned again on {n} questions, |Δ letter logprob| mean {np.mean(d):.5f} max {max(d):.5f}, "
+        f"same prediction {same:.4f}  {'ok' if np.mean(d) < 0.01 and same > 0.98 else 'MISMATCH'}")
 
 
 if __name__ == "__main__":  # vLLM spawns engine processes that re-import this module
