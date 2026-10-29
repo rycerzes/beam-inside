@@ -4,12 +4,13 @@
 # ///
 """Watch an HF Job: relay the session's progress lines and warn as its GPU spend crosses thresholds.
 
-    uv run scripts/watch_job.py JOB_ID [--rate 11.0] [--expected 12.8] [--every 2.5] [--grep REGEX]
+    uv run scripts/watch_job.py JOB_ID [--rate 11.0] [--expected 12.8] [--every 2.5] [--grep REGEX] [--resume]
 
 One line per event on stdout (for a Monitor): the job starting, each log line matching --grep (progress, aborts,
 errors), a BUDGET line at $5, $10, the expected cost and then every --every dollars past it, and the final stage
 with the spend. Spend is the runtime since the job started times --rate (the flavor's hourly price), which is what
-HF bills for Jobs. Nothing is cancelled: stopping the job is the user's call.
+HF bills for Jobs. Nothing is cancelled: stopping the job is the user's call. --resume (re-watching a running job)
+starts the log stream at its last lines and skips thresholds already crossed.
 """
 
 import argparse
@@ -25,6 +26,7 @@ parser.add_argument("job")
 parser.add_argument("--rate", type=float, default=11.0, help="USD per hour of the job's flavor")
 parser.add_argument("--expected", type=float, default=12.8, help="the quoted cost; warnings past it get louder")
 parser.add_argument("--every", type=float, default=2.5)
+parser.add_argument("--resume", action="store_true")
 parser.add_argument("--grep", default=r"mmlu|sanity|loaded|ABORT|SESSION DONE|Traceback|Error|error|Killed|OOM")
 args = parser.parse_args()
 api = HfApi()
@@ -39,7 +41,7 @@ def logs():
     pattern = re.compile(args.grep)
     while not done.is_set():
         try:
-            for line in api.fetch_job_logs(job_id=args.job, follow=True):
+            for line in api.fetch_job_logs(job_id=args.job, follow=True, tail=3 if args.resume else None):
                 if pattern.search(line):
                     say("LOG", line.strip()[:400])
             return
@@ -62,6 +64,13 @@ while True:
         started = info.started_at or datetime.now(timezone.utc)
         say(f"RUNNING since {started:%H:%M:%S} UTC at ${args.rate:.2f}/h; expected about ${args.expected:.2f}")
     spent = (datetime.now(timezone.utc) - started).total_seconds() / 3600 * args.rate if started else 0.0
+    if args.resume and started and not getattr(args, "skipped", False):
+        args.skipped = True
+        while thresholds and spent >= thresholds[0]:
+            t = thresholds.pop(0)
+            if t >= args.expected:
+                thresholds.append(t + args.every)
+        say(f"resumed at spend ${spent:.2f}; next warning at ${thresholds[0]:.2f}")
     while thresholds and spent >= thresholds[0]:
         t = thresholds.pop(0)
         over = t >= args.expected
