@@ -730,7 +730,7 @@ def run_mmlu(llm, config, tok, chat):
                                     "lp_correct": round(float(np.mean([r["lp"][r["answer"]] for r in v])), 4)}
                                 for c, v in sorted(by.items())}}
 
-    results, base_rows = {}, None
+    results, base_rows, last_rows = {}, None, None
     for arm in arms:
         if over_budget():
             log(f"mmlu: budget reached, arm {arm['name']} and later not run")
@@ -747,6 +747,7 @@ def run_mmlu(llm, config, tok, chat):
             if bans:
                 llm.collective_rpc("beam_steer_reset_bias")
         save(f"mmlu_{arm['name']}.jsonl.gz", rows)
+        last_rows = rows if bans else last_rows
         results[arm["name"]] = {"bans": len(bans), "tok_per_s": round(tps), **summary(rows)}
         save_json("mmlu_summary.json", results)
         r = results[arm["name"]]
@@ -759,14 +760,23 @@ def run_mmlu(llm, config, tok, chat):
                 sys.exit(3)
     n = min(args.mmlu_restore, len(qs))
     again, _ = score(qs[:n])
-    # A smaller batch than the first run: kernels may differ by batch noise (Marlin ~0.01 on the tiny model); a bias
-    # left banned would move the letters by far more.
-    d = [abs(a - b) for x, y in zip(again, base_rows[:n]) for a, b in zip(x["lp"], y["lp"]) if np.isfinite(a) and np.isfinite(b)]
+    # A smaller batch than the first run, so it differs by engine noise (on Beam with TP 4: mean 0.12 nats, 7% of
+    # predictions); a bias left banned would make it look like the last banned arm instead, so that is the test.
+    def mean_diff(xs, ys):
+        return float(np.mean([abs(a - b) for x, y in zip(xs, ys) for a, b in zip(x["lp"], y["lp"])
+                              if np.isfinite(a) and np.isfinite(b)]))
+    to_base = mean_diff(again, base_rows[:n])
+    to_last = mean_diff(again, last_rows[:n]) if last_rows else float("nan")
     same = float(np.mean([x["pred"] == y["pred"] for x, y in zip(again, base_rows[:n])]))
-    save_json("mmlu_restore.json", {"n": n, "max_abs_lp_diff": max(d), "mean_abs_lp_diff": float(np.mean(d)),
-                                    "pred_agreement": same})
-    log(f"mmlu restore check: unbanned again on {n} questions, |Δ letter logprob| mean {np.mean(d):.5f} max {max(d):.5f}, "
-        f"same prediction {same:.4f}  {'ok' if np.mean(d) < 0.01 and same > 0.98 else 'MISMATCH'}")
+    acc = float(np.mean([r["pred"] == r["answer"] for r in again]))
+    save_json("mmlu_restore.json", {"n": n, "mean_abs_lp_diff_to_base": to_base, "mean_abs_lp_diff_to_last_ban": to_last,
+                                    "pred_agreement": same, "acc": acc,
+                                    "acc_base_same_questions": float(np.mean([r["pred"] == r["answer"]
+                                                                              for r in base_rows[:n]]))})
+    save(f"mmlu_restore.jsonl.gz", again)
+    log(f"mmlu restore check: unbanned again on {n} questions, mean |Δ letter logprob| to base {to_base:.3f}, "
+        f"to the last banned arm {to_last:.3f}, same prediction as base {same:.3f}  "
+        f"{'ok' if not to_base > 0.5 * to_last else 'BIAS LEAK?'}")
 
 
 if __name__ == "__main__":  # vLLM spawns engine processes that re-import this module
