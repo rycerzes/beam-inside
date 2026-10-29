@@ -36,6 +36,8 @@ parser.add_argument("mode", choices=["rehearsal", "real"])
 parser.add_argument("--repo", required=True)
 parser.add_argument("--hours", type=float, default=3.0)
 parser.add_argument("--variant", choices=list(VARIANTS), default="nvfp4")
+parser.add_argument("--phases", default="sanity,stats,calib,effort,sweep")
+parser.add_argument("--session-args", default="", help="extra session.py flags, e.g. '--max-model-len 16384'")
 args = parser.parse_args()
 api = HfApi()
 
@@ -63,24 +65,29 @@ if args.mode == "rehearsal":
     script = setup + """REF=""
 python3 -c "from transformers import BeamForCausalLM" 2>/dev/null || { $PI --no-deps --target /ref "transformers==5.21.0"; REF=/ref; }
 PYTHONPATH=$REF python3 vllm_tiny_check.py ref out
-python3 session.py --model out/ckpt_bf16 --tiny --out run --upload REPO --budget-min 20
-""".replace("REPO", args.repo)
+python3 session.py --model out/ckpt_bf16 --tiny --out run --upload REPO --budget-min 20 --max-model-len 1024 \\
+    --effort-questions 12 --effort-gen-questions 6 --effort2-problems 6 --phases PHASES EXTRA
+""".replace("REPO", args.repo).replace("PHASES", args.phases).replace("EXTRA", args.session_args)
+    capture_rows = 256
 else:
     model, flavor, tp, moe = VARIANTS[args.variant]
     hours = args.hours
-    for name in ("units.npz", "units.jsonl"):
-        api.upload_file(path_or_fileobj=str(ROOT / "data/sweep" / name), path_in_repo=f"inputs/{name}",
-                        repo_id=args.repo, repo_type="dataset")
+    for src in ("data/sweep/units.npz", "data/sweep/units.jsonl", "data/effort2/inputs.pt"):
+        if "sweep" in args.phases or "effort2" in src:
+            api.upload_file(path_or_fileobj=str(ROOT / src), path_in_repo=f"inputs/{pathlib.Path(src).name}",
+                            repo_id=args.repo, repo_type="dataset")
     script = setup + f"""python3 -c "from huggingface_hub import snapshot_download as s; s('{args.repo}', repo_type='dataset', allow_patterns=['inputs/*'], local_dir='in')"
 python3 session.py --model {model} --tp {tp} --moe-backend {moe} --units in/inputs/units.npz --meta in/inputs/units.jsonl --out run \\
-    --upload {args.repo} --budget-min {int(hours * 60 - 25)}
+    --upload {args.repo} --budget-min {int(hours * 60 - 25)} --phases {args.phases} \\
+    --effort2-inputs in/inputs/inputs.pt {args.session_args}
 """
+    capture_rows = 4096  # ~2.4 GB per GPU at Beam's size: 91 questions x 9 efforts x 5 positions per dump
 
 minutes = int(hours * 60)
 print(f"{flavor} for at most {minutes} min = ${PRICE[flavor] * hours:.2f} cap")
 job = api.run_job(image=IMAGE, command=["bash", "-c", script], flavor=flavor, timeout=f"{minutes}m",
                   secrets={"HF_TOKEN": get_token()},
                   env={"VLLM_USE_V2_MODEL_RUNNER": "0", "HF_XET_HIGH_PERFORMANCE": "1", "PYTHONUNBUFFERED": "1",
-                       "HF_HUB_DISABLE_PROGRESS_BARS": "1"},
+                       "HF_HUB_DISABLE_PROGRESS_BARS": "1", "BEAM_STEER_CAPTURE_ROWS": str(capture_rows)},
                   name=f"beam-steer-{args.mode}" + (f"-{args.variant}" if args.mode == "real" else ""))
 print(job.id, job.url)

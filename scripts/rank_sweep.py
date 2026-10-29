@@ -6,7 +6,7 @@
 
     uv run scripts/rank_sweep.py RUN_DIR [--meta data/sweep/units.jsonl]   # -> RUN_DIR/ranked.jsonl
 
-Per unit and pole (positive doses +0.5/+0.8, negative dose -0.7), the theme is the set of words that show up in the
+Per unit and pole (positive doses, negative dose), the theme is the set of words that show up in the
 steered rollouts of at least two of the three unrelated prompts (who / snake / orange) and in none of the unsteered
 baselines. A concept the unit writes should surface whatever the prompt; a generic disruption should not repeat.
 Each theme word counts log(N_poles / poles with that word), so words every unit produces count for little.
@@ -84,7 +84,8 @@ for (u, pole), s in score.items():
     top = sorted(themes[(u, pole)], key=lambda w: -math.log(n_poles / df[w]))[:12]
     row = {**{k: v for k, v in m.items() if k != "lens"}, "pole": pole, "score": round(s, 2),
            "pct": round(float(np.mean([c < s for c in ctrl])), 3) if ctrl else None, "theme": top, "lens": m.get("lens")}
-    e = effort.get(u, {}).get(0.8 if pole == "+" else -0.7)
+    doses = effort.get(u, {})  # v1 doses (+0.8, -0.7) x c_L, v2 fractions (+1, -1) of τ*: the strongest of the pole
+    e = doses.get((max if pole == "+" else min)(doses)) if doses else None
     if e is not None and base_effort:
         row["effort"] = {"analysis_len": e.get("analysis_len"), "base_analysis_len": base_effort.get("analysis_len"),
                          "final": e.get("final"), "correct": correct(e), "base_correct": correct(base_effort)}
