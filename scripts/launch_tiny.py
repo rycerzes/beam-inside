@@ -5,7 +5,7 @@
 """Launch the beam_steer tiny-model check on HF Jobs, shipping the files inside the command (nothing is uploaded).
 
     uv run scripts/launch_tiny.py cpu   # cpu-basic: image entrypoint, plugin import, reference build
-    uv run scripts/launch_tiny.py gpu   # rtx-pro-6000: full check, eager and CUDA graphs
+    uv run scripts/launch_tiny.py gpu   # rtx-pro-6000: full check (BF16 eager / graphs, NVFP4 Marlin), capture, session
 
 No secrets are passed: the tiny model is built inside the job, so nothing gated is downloaded.
 """
@@ -23,7 +23,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 FILES = {"steer/beam_steer.py": "steer/beam_steer.py", "steer/pyproject.toml": "steer/pyproject.toml",
          "scripts/vllm_tiny_check.py": "vllm_tiny_check.py",
          "scripts/session.py": "session.py", "meta/config.json": "out/real_config.json"}
-FLAVORS = {"cpu": ("cpu-basic", "20m"), "gpu": ("rtx-pro-6000", "45m")}
+FLAVORS = {"cpu": ("cpu-basic", "20m"), "gpu": ("rtx-pro-6000", "30m")}
 
 mode = sys.argv[1]
 buf = io.BytesIO()
@@ -50,12 +50,14 @@ echo PROBE DONE
 else:
     script += """nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total --format=csv
 export VLLM_USE_V2_MODEL_RUNNER=0
-for run in "nvfp4 --moe marlin" "nvfp4 --moe auto"; do
+for run in "bf16 --eager" "bf16" "nvfp4 --moe marlin"; do
   python3 vllm_tiny_check.py vllm out $run 2>&1 | awk '!/INFO/ || /NvFp4|Marlin|marlin|backend/' | tail -30 || true
 done
 PYTHONPATH=$REF python3 vllm_tiny_check.py teacher out
+PYTHONPATH=$REF python3 vllm_tiny_check.py capture out || true
 python3 vllm_tiny_check.py compare out || true
-python3 session.py --model out/ckpt_nvfp4 --tiny --out run --moe-backend marlin --budget-min 15 2>&1 | grep -v "INFO" | tail -12
+BEAM_STEER_CAPTURE_ROWS=256 python3 session.py --model out/ckpt_nvfp4 --tiny --out run --moe-backend marlin --budget-min 15 \\
+    --max-model-len 1024 --effort-questions 12 --effort-gen-questions 6 2>&1 | grep -v "INFO" | tail -30
 """
 
 flavor, timeout = FLAVORS[mode]

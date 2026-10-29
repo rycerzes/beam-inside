@@ -2,6 +2,8 @@
 
     python vllm_tiny_check.py ref OUT       # transformers: build checkpoint, reference logprobs and residual norms
     python vllm_tiny_check.py vllm OUT fp8|bf16|nvfp4 [--eager] [--moe BACKEND]   # vLLM + beam_steer -> OUT/vllm_<tag>.json
+    python vllm_tiny_check.py teacher OUT   # decode steps of vLLM's greedy continuations through the reference
+    python vllm_tiny_check.py capture OUT   # captured residuals and router logits vs the reference
     python vllm_tiny_check.py compare OUT   # verdict
 
 The tiny model takes the real config.json (meta/config.json, or OUT/real_config.json) and shrinks only the sizes,
@@ -19,9 +21,16 @@ the default Blackwell kernel also quantises activations to FP4 (W4A4) and is rep
 
 Steering slots: 1 pushes the residual leaving dense layer 1, 2 the one leaving MoE layer 5, 3 both layers 2 and 6.
 Each push is 0.8 x the reference median residual norm leaving that layer, along a fixed random direction.
+Routing: slot 4 adds router logit deltas only: at every MoE layer it forces the two least-used experts in (+8) and
+bans the two most-used (-30), applied inside the reference router before its grouped top-k.
+Variants: 2w is slot 2 steered on positions 20-59 only, 3s is slot 3 skipping a set of token ids; each is held to its
+own masked reference. Capture: residuals leaving every layer and MoE router logits at five positions of each prompt
+(first, sixth, last, and the first two fed-back generated tokens), unsteered and under slot 3, with the prefill
+chunked across steps, held to the reference's BF16 floor.
 """
 
 import json
+import os
 import pathlib
 import re
 import sys
@@ -58,6 +67,43 @@ FP8_LINEAR = re.compile(r"model\.layers\.\d+\.(self_attn\.(q|k|v|o|gate)_proj|ml
 def prompts():
     g = torch.Generator().manual_seed(SEED + 1)
     return [torch.randint(0, VOCAB, (n,), generator=g).tolist() for n in PROMPT_LENS]
+
+
+SKIP_IDS = sorted({ids[t] for ids in prompts() for t in range(2, min(40, len(ids)), 4)})
+VARIANTS = {"2w": (2, {"steer_from": 20, "steer_until": 60}), "3s": (3, {"steer_skip_ids": SKIP_IDS})}
+ROUTE_SLOT = 4
+CASES = {"0": (0, {}), **{str(s): (s, {}) for s in STEERS}, "4r": (ROUTE_SLOT, {}), **VARIANTS}  # key -> (slot, extra_args)
+CAPTURE_SLOTS = (0, 3, ROUTE_SLOT)
+
+
+def capture_positions(ids):
+    return sorted({0, 5, len(ids) - 1, len(ids), len(ids) + 1})  # 5 is the last token of the 6-token prompt
+
+
+def _mask(ids, kw):
+    """Positions of ids that a request with steering extra_args kw steers."""
+    pos = torch.arange(len(ids))
+    m = pos >= kw.get("steer_from", 0)
+    if kw.get("steer_until") is not None:
+        m &= pos < kw["steer_until"]
+    if kw.get("steer_skip_ids"):
+        m &= ~torch.isin(torch.tensor(ids), torch.tensor(kw["steer_skip_ids"]))
+    return m
+
+
+def _case_logprobs(model, ids, pushes, key, routes):
+    slot, kw = CASES[key]
+    return _run(model, ids, pushes.get(slot, []), _mask(ids, kw), routes=routes.get(slot, []))[0]
+
+
+def _bf16(model):
+    """The reference in BF16 with the router kept FP32, as in the checkpoint: the floor a BF16 engine is held to."""
+    copy = type(model)(model.config).eval().to(torch.bfloat16)
+    copy.load_state_dict(model.state_dict())
+    for name, mod in copy.named_modules():
+        if name.endswith("mlp.gate"):
+            mod.float()
+    return copy
 
 
 def fp8(w):
@@ -164,37 +210,85 @@ def ref_nvfp4(out):
 
     plain = [_run(model, ids) for ids in ps]
     result = {"median_norm": [torch.cat([n[i] for _, n in plain]).median().item() for i in range(config.num_hidden_layers)],
-              "logprobs": {0: [lp for lp, _ in plain]}}
-    for slot in STEERS:
-        result["logprobs"][slot] = [_run(model, ids, pushes[slot])[0] for ids in ps]
-    model_bf16 = type(model)(config).eval().to(torch.bfloat16)
-    model_bf16.load_state_dict(model.state_dict())
-    for name, mod in model_bf16.named_modules():
-        if name.endswith("mlp.gate"):
-            mod.float()
-    result["logprobs_bf16"] = {s_: [_run(model_bf16, ids, pushes.get(s_, []))[0] for ids in ps] for s_ in [0, *STEERS]}
+              **_case_refs(model, pushes, ps, _routes(out))}
     ref = json.loads((out / "ref.json").read_text())
     (out / "ref.json").write_text(json.dumps(ref | {"nvfp4": result}))
     print("ref nvfp4: median residual norm per layer", [round(m, 3) for m in result["median_norm"]])
 
 
-def _run(model, ids, pushes=()):
-    """Reference logprobs of ids[1:] and per-layer residual norms (positions > 0), with pushes [(layer, delta)]."""
-    norms, hooks = {}, []
+def _routed(router, deltas):
+    """transformers' BeamTopKRouter.forward with logit deltas [T, experts] added before the grouped top-k."""
+    def forward(hidden_states):
+        hidden_states = hidden_states.view(-1, router.hidden_dim)
+        router_logits = torch.nn.functional.linear(hidden_states.float(), router.weight.float()) + deltas
+        scores = router_logits.sigmoid()
+        choice = scores + router.e_score_correction_bias
+        group_scores = choice.view(-1, router.num_group, router.num_experts // router.num_group).topk(2, dim=-1)[0].sum(-1)
+        group_idx = torch.topk(group_scores, k=router.topk_group, dim=-1)[1]
+        group_mask = torch.zeros_like(group_scores).scatter_(1, group_idx, 1)
+        score_mask = group_mask.unsqueeze(-1).expand(-1, router.num_group, router.num_experts // router.num_group)
+        choice = choice.masked_fill(~score_mask.reshape(-1, router.num_experts).bool(), float("-inf"))
+        topk_indices = torch.topk(choice, k=router.top_k, dim=-1)[1]
+        topk_weights = scores.gather(1, topk_indices)
+        if router.norm_topk_prob:
+            topk_weights /= topk_weights.sum(dim=-1, keepdim=True) + 1e-20
+        return router_logits, topk_weights, topk_indices
+    return forward
+
+
+def _run(model, ids, pushes=(), mask=None, keep=False, routes=()):
+    """Reference logprobs of ids[1:] and per-layer residual norms (positions > 0), with pushes [(layer, delta)] and
+    router logit deltas [(layer, expert, delta)] applied at the positions where mask is true (all if None). keep
+    also returns the residual leaving every layer [layers, T, hidden] and the router logits as the router saw them
+    {MoE layer: [T, experts]}, both float32."""
+    norms, resid, moe_in, hooks = {}, {}, {}, []
+    scale = None if mask is None else mask[None, :, None]
+    on = torch.ones(len(ids)) if mask is None else mask.float()
+    route_delta = {}
+    for li, expert, delta in routes:
+        route_delta.setdefault(li, torch.zeros(len(ids), model.config.num_experts))[:, expert] += float(delta) * on
+    for li, d in route_delta.items():
+        model.model.layers[li].mlp.gate.forward = _routed(model.model.layers[li].mlp.gate, d)
     for i, layer in enumerate(model.model.layers):
         def hook(m, a, o, i=i):
             for li, delta in pushes:
                 if li == i:
-                    o = o + delta.to(o.dtype)
+                    d = delta.to(o.dtype)
+                    o = o + (d if scale is None else d * scale.to(o.dtype))
             norms[i] = o[0, 1:].float().norm(dim=-1)
+            if keep:
+                resid[i] = o[0].float()
             return o
         hooks.append(layer.register_forward_hook(hook))
+        if keep and model.config.mlp_layer_types[i] == "sparse":
+            hooks.append(layer.mlp.register_forward_pre_hook(
+                lambda m, a, i=i: moe_in.__setitem__(i, a[0].reshape(-1, a[0].shape[-1]))))
     with torch.no_grad():
         logits = model(torch.tensor([ids])).logits[0]
+        router = {i: torch.nn.functional.linear(x.float(), model.model.layers[i].mlp.gate.weight.float())
+                  + route_delta.get(i, 0.0) for i, x in moe_in.items()}
     for h in hooks:
         h.remove()
+    for li in route_delta:
+        del model.model.layers[li].mlp.gate.forward  # back to the class's forward
     lp = torch.log_softmax(logits.float(), -1)[:-1].gather(1, torch.tensor(ids[1:])[:, None])[:, 0]
+    if keep:
+        return lp.tolist(), norms, torch.stack([resid[i] for i in range(len(resid))]), router
     return lp.tolist(), norms
+
+
+def _case_refs(model, pushes, ps, routes):
+    """Reference prompt logprobs for every case, in float32 and in BF16 (the floor)."""
+    model_bf16 = _bf16(model)
+    return {"logprobs": {k: [_case_logprobs(model, ids, pushes, k, routes) for ids in ps] for k in CASES},
+            "logprobs_bf16": {k: [_case_logprobs(model_bf16, ids, pushes, k, routes) for ids in ps] for k in CASES}}
+
+
+def _routes(out):
+    routes = {}
+    for slot, layer, expert, delta in torch.load(out / "steer_route.pt", weights_only=True):
+        routes.setdefault(slot, []).append((layer, expert, delta))
+    return routes
 
 
 def _pushes(out):
@@ -220,7 +314,7 @@ def teacher(out):
     models = {"": _load_ref_model(out)}
     if (out / "ref_model_nvfp4.pt").exists():
         models["nvfp4"] = _load_ref_model(out, "ref_model_nvfp4.pt")
-    pushes, ps = _pushes(out), prompts()
+    pushes, ps, routes = _pushes(out), prompts(), _routes(out)
     for tag in RUNS:
         path = out / f"vllm_{tag}.json"
         if not path.exists():
@@ -228,13 +322,83 @@ def teacher(out):
         model = models["nvfp4" if tag.startswith("nvfp4") else ""]
         v = json.loads(path.read_text())
         line = []
-        for slot in ["0", *map(str, STEERS)]:
+        for key in CASES:
             diffs = []
-            for ids, gen, glp in zip(ps, v["greedy"][slot], v["greedy_logprobs"][slot]):
-                lp, _ = _run(model, ids + gen, pushes.get(int(slot), []))
+            for ids, gen, glp in zip(ps, v["greedy"][key], v["greedy_logprobs"][key]):
+                lp = _case_logprobs(model, ids + gen, pushes, key, routes)
                 diffs += [abs(a - b) for a, b in zip(lp[len(ids) - 1:], glp)]
-            line.append(f"slot {slot} {np.mean(diffs):.4f}")
+            line.append(f"{key} {np.mean(diffs):.4f}")
         print(f"decode |Δlogprob| vs reference, {tag}: " + ", ".join(line))
+
+
+def _topk(logits, gate, config):
+    """Experts Beam's grouped sigmoid router picks from router logits [experts] (noaux_tc: groups ranked by the
+    sum of their top-2 biased scores)."""
+    biased = (torch.sigmoid(logits) + gate.e_score_correction_bias.float()).view(config.n_group, -1)
+    keep = biased.topk(2, -1).values.sum(-1).topk(config.topk_group).indices
+    masked = torch.full_like(biased, -float("inf"))
+    masked[keep] = biased[keep]
+    return set(masked.flatten().topk(config.num_experts_per_tok).indices.tolist())
+
+
+def capture(out):
+    """Captured residuals and router logits vs the reference, teacher-forced on vLLM's greedy tokens."""
+    models = {"": _load_ref_model(out)}
+    if (out / "ref_model_nvfp4.pt").exists():
+        models["nvfp4"] = _load_ref_model(out, "ref_model_nvfp4.pt")
+    pushes, ps, ok, routes = _pushes(out), prompts(), True, _routes(out)
+    checked = 0
+
+    def rel(a, b):  # per-layer relative error, rows [layers, d] or [d]
+        return ((a - b).norm(dim=-1) / b.norm(dim=-1)).reshape(-1)
+
+    for tag, tol in RUNS.items():
+        path = out / f"capture_{tag}.pt"
+        if not path.exists():
+            continue
+        checked += tol
+        model = models["nvfp4" if tag.startswith("nvfp4") else ""]
+        model_bf16, config = _bf16(model), model.config
+        cap = torch.load(path, weights_only=True)
+        gens = json.loads((out / f"vllm_{tag}.json").read_text())["capture_gen"]
+        rows = {(key[0], key[1], pos): (r, slot) for r, (key, pos, _, slot) in enumerate(cap["index"])}
+        expected = sum(len(capture_positions(ids)) for ids in ps) * len(CAPTURE_SLOTS)
+        err, floor, shifted, r_err, r_floor, agree, wrong_slot = ([] for _ in range(7))
+        for s_ in CAPTURE_SLOTS:
+            for i, ids in enumerate(ps):
+                full = ids + gens[f"{s_}/{i}"][:2]
+                _, _, want, router = _run(model, full, pushes.get(s_, []), keep=True, routes=routes.get(s_, []))
+                _, _, want_bf16, router_bf16 = _run(model_bf16, full, pushes.get(s_, []), keep=True,
+                                                    routes=routes.get(s_, []))
+                for pos in capture_positions(ids):
+                    if (s_, i, pos) not in rows:
+                        continue
+                    r, slot = rows[(s_, i, pos)]
+                    wrong_slot.append(slot != s_)
+                    got = cap["resid"][:, r].float()
+                    err.append(rel(got, want[:, pos]))
+                    floor.append(rel(want_bf16[:, pos], want[:, pos]))
+                    shifted.append(rel(got, want[:, pos - 1 if pos else 1]))
+                    for li, logits in router.items():
+                        r_err.append(rel(cap["router"][li, r], logits[pos]))
+                        r_floor.append(rel(router_bf16[li][pos], logits[pos]))
+                        gate = model.model.layers[li].mlp.gate
+                        agree.append(_topk(cap["router"][li, r], gate, config) == _topk(logits[pos], gate, config))
+        err, floor, shifted = (float(torch.cat(x).mean()) for x in (err, floor, shifted))
+        r_err, r_floor = (float(torch.cat(x).mean()) for x in (r_err, r_floor))
+        count_ok = len(cap["index"]) == expected and cap["dropped"] == 0 and not any(wrong_slot)
+        resid_ok = not tol or (err < 2 * floor and shifted > 5 * err)
+        router_ok = not tol or r_err < 2 * r_floor
+        ok &= count_ok and resid_ok and router_ok
+        print(f"== capture {tag}: {len(cap['index'])}/{expected} rows, dropped {cap['dropped']}, "
+              f"slot mislabelled {sum(wrong_slot)}  {'ok' if count_ok else 'FAIL'}")
+        print(f"  residual rel err {err:.4f} (BF16 floor {floor:.4f}; vs neighbouring position {shifted:.3f})  "
+              f"{'ok' if resid_ok else 'FAIL'}")
+        print(f"  router logits rel err {r_err:.4f} (BF16 floor {r_floor:.4f}); same top-k experts {np.mean(agree):.0%}  "
+              f"{'ok' if router_ok else 'FAIL'}")
+    ok &= checked > 0
+    print("CAPTURE OK" if ok else "CAPTURE MISMATCH")
+    return ok
 
 
 def ref(out):
@@ -303,58 +467,71 @@ def ref(out):
             entries.append((slot, li, DOSE * median[li] * u / u.norm()))
     torch.save(entries, out / "steer.pt")
     pushes = _pushes(out)
-    result = {"median_norm": median, "logprobs": {0: [lp for lp, _ in plain]}}
-    for slot in STEERS:
-        result["logprobs"][slot] = [_run(model, ids, pushes[slot])[0] for ids in ps]
-    # The same reference run in BF16: the rounding floor a BF16 engine can be held to.
-    model_bf16 = BeamForCausalLM(config).eval().to(torch.bfloat16)
-    model_bf16.load_state_dict(model.state_dict())
-    for name, mod in model_bf16.named_modules():
-        if name.endswith("mlp.gate"):
-            mod.float()  # the router stays FP32, as in the checkpoint
-    result["logprobs_bf16"] = {s_: [_run(model_bf16, ids, pushes.get(s_, []))[0] for ids in ps] for s_ in [0, *STEERS]}
+    # Routing slot: at every MoE layer, force the two least-used experts in and ban the two most-used.
+    use = {}
+    for ids in ps:
+        for li, logits in _run(model, ids, keep=True)[3].items():
+            for row in logits:
+                for e in _topk(row, model.model.layers[li].mlp.gate, config):
+                    use[(li, e)] = use.get((li, e), 0) + 1
+    moe = [i for i, t in enumerate(config.mlp_layer_types) if t == "sparse"]
+    by_use = {L: sorted(range(config.num_experts), key=lambda e: use.get((L, e), 0)) for L in moe}
+    torch.save([(ROUTE_SLOT, L, e, 8.0) for L in moe for e in by_use[L][:2]]
+               + [(ROUTE_SLOT, L, e, -30.0) for L in moe for e in by_use[L][-2:]], out / "steer_route.pt")
+    result = {"median_norm": median, **_case_refs(model, pushes, ps, _routes(out))}
     (out / "ref.json").write_text(json.dumps({"prompts": ps, **result}))
     print("ref: median residual norm per layer", [round(m, 3) for m in median])
 
 
 def vllm_run(out, kind, eager, moe):
     sys.path.insert(0, str(pathlib.Path(__file__).parent))
+    os.environ["BEAM_STEER_CAPTURE_ROWS"] = "256"
     from vllm import LLM, SamplingParams
 
     from beam_steer import hist_quantiles
 
+    # max_num_batched_tokens 96 chunks the 120-token prompt across steps; prefix caching would skip steering and
+    # capture on cached prompt tokens.
     llm = LLM(model=str(out / f"ckpt_{kind}"), skip_tokenizer_init=True, dtype="bfloat16", max_model_len=512,
               gpu_memory_utilization=0.3, enforce_eager=eager, async_scheduling=False, moe_backend=moe or "triton",
-              max_num_seqs=64, seed=SEED)
+              max_num_seqs=64, max_num_batched_tokens=96, enable_prefix_caching=False, seed=SEED)
     print("steered rows loaded:", llm.collective_rpc("beam_steer_set", args=(str(out / "steer.pt"),)))
+    print("router deltas loaded:", llm.collective_rpc("beam_steer_set_route", args=(str(out / "steer_route.pt"),)))
     ps = prompts()
 
-    def params(slot, **kw):
-        return SamplingParams(temperature=0, detokenize=False, extra_args={"steer_slot": slot}, **kw)
+    def params(slot, extra=None, **kw):
+        return SamplingParams(temperature=0, detokenize=False, extra_args={"steer_slot": slot, **(extra or {})}, **kw)
 
     # Residual norms on an unsteered batch.
     llm.collective_rpc("beam_steer_reset_stats")
     llm.generate([{"prompt_token_ids": ids} for ids in ps], params(0, max_tokens=1), use_tqdm=False)
     median = [q[1] for q in hist_quantiles(llm.collective_rpc("beam_steer_stats")[0])]
 
-    # Prompt logprobs and greedy continuations for every (slot, prompt) in one mixed batch.
-    slots = [0, *STEERS]
-    reqs = [(s, ids) for s in slots for ids in ps]
-    outs = llm.generate([{"prompt_token_ids": ids} for _, ids in reqs],
-                        [params(s, max_tokens=24, prompt_logprobs=0, logprobs=0) for s, _ in reqs], use_tqdm=False)
-    logprobs, greedy, greedy_lp = ({s: [] for s in slots} for _ in range(3))
-    for (s, ids), o in zip(reqs, outs):
-        logprobs[s].append([o.prompt_logprobs[t][ids[t]].logprob for t in range(1, len(ids))])
+    # Prompt logprobs and greedy continuations for every (case, prompt), plus the capture requests, in one mixed batch.
+    reqs = [(k, ids, params(CASES[k][0], CASES[k][1], max_tokens=24, prompt_logprobs=0, logprobs=0))
+            for k in CASES for ids in ps]
+    reqs += [(f"cap{s}/{i}", ids, params(s, {"capture": capture_positions(ids), "capture_key": [s, i]}, max_tokens=3))
+             for s in CAPTURE_SLOTS for i, ids in enumerate(ps)]
+    outs = llm.generate([{"prompt_token_ids": ids} for _, ids, _ in reqs], [p for _, _, p in reqs], use_tqdm=False)
+    logprobs, greedy, greedy_lp = ({k: [] for k in CASES} for _ in range(3))
+    capture_gen = {}
+    for (k, ids, _), o in zip(reqs, outs):
         gen = list(o.outputs[0].token_ids)
-        greedy[s].append(gen)
-        greedy_lp[s].append([d[t].logprob for t, d in zip(gen, o.outputs[0].logprobs)])
+        if k.startswith("cap"):
+            capture_gen[k[3:]] = gen
+            continue
+        logprobs[k].append([o.prompt_logprobs[t][ids[t]].logprob for t in range(1, len(ids))])
+        greedy[k].append(gen)
+        greedy_lp[k].append([d[t].logprob for t, d in zip(gen, o.outputs[0].logprobs)])
     # The same unsteered requests on their own: any leak from steered neighbours shows up as a difference.
     alone = llm.generate([{"prompt_token_ids": ids} for ids in ps], [params(0, max_tokens=1, prompt_logprobs=0)] * len(ps),
                          use_tqdm=False)
     alone = [[o.prompt_logprobs[t][ids[t]].logprob for t in range(1, len(ids))] for ids, o in zip(ps, alone)]
     tag = f"{kind}{'-' + moe if moe else ''}_{'eager' if eager else 'graphs'}"
+    print("captured rows, dropped:", llm.collective_rpc("beam_steer_capture_dump", args=(str(out / f"capture_{tag}.pt"),)))
     (out / f"vllm_{tag}.json").write_text(json.dumps(
         {"median_norm": median, "logprobs": logprobs, "greedy": greedy, "greedy_logprobs": greedy_lp, "alone": alone,
+         "capture_gen": capture_gen,
          "device": torch.cuda.get_device_name(), "capability": torch.cuda.get_device_capability()}))
     print(f"vllm {tag}: median residual norm per layer", [round(m, 3) for m in median])
 
@@ -370,14 +547,14 @@ def compare(out):
     def mad(xs, ys):
         return float(np.mean(np.concatenate([np.abs(np.array(a) - np.array(b)) for a, b in zip(xs, ys)])))
 
-    ok = True
+    ok, ran = True, 0
     for tag, tol in RUNS.items():
         path = out / f"vllm_{tag}.json"
         if not path.exists():
             print(f"{tag}: not run")
             continue
+        ran += tol
         ref = refs["nvfp4"] if tag.startswith("nvfp4") else refs
-        plain = [np.array(x) for x in ref["logprobs"]["0"]]
         floor = {s_: mad(ref["logprobs_bf16"][s_], ref["logprobs"][s_]) for s_ in ref["logprobs"]}
         v = json.loads(path.read_text())
         print(f"== {tag} on {v['device']} sm{v['capability'][0]}{v['capability'][1]}"
@@ -386,16 +563,27 @@ def compare(out):
         norms_ok = bool(np.all(np.abs(ratio - 1) < 0.15))  # histogram bins are 9% wide
         ok &= norms_ok
         print(f"  median residual norm vLLM/ref per layer: {np.round(ratio, 3).tolist()}  {'ok' if norms_ok else 'FAIL'}")
-        for slot in ["0", *map(str, STEERS)]:
-            got, want = v["logprobs"][slot], ref["logprobs"][slot]
+        for key, (slot, kw) in CASES.items():
+            got, want = v["logprobs"][key], ref["logprobs"][key]
             match = mad(got, want)
             per_prompt = [round(mad([a], [b]), 4) for a, b in zip(got, want)]
-            line = f"  slot {slot}: |Δ| vs its ref {match:.4f} (BF16 floor {floor[slot]:.4f}; per prompt {per_prompt})"
-            passed = not tol or match < floor[slot]
-            if slot != "0":
-                off = mad(got, plain)
-                line += f", vs unsteered ref {off:.4f}"
-                passed &= off > 5 * match if tol else off > 2 * match
+            line = f"  {key}: |Δ| vs its ref {match:.4f} (BF16 floor {floor[key]:.4f}; per prompt {per_prompt})"
+            passed = not tol or match < floor[key]
+            # Off-target refs: unsteered for a slot; unsteered and the slot steered everywhere for a variant.
+            for other in ([] if key == "0" else ["0"] + ([str(slot)] if kw else [])):
+                if not kw:
+                    off = mad(got, [np.array(x) for x in ref["logprobs"][other]])
+                    line += f", vs {other} ref {off:.4f}"
+                    passed &= off > 5 * match if tol else off > 2 * match
+                    continue
+                # A variant differs from its off-target refs on part of the tokens only: on the tokens where the
+                # two refs differ by > 0.2 nats, vLLM's mean |Δ| to its own ref must be well under that to the other
+                # (the BF16 reference itself, as a stand-in for vLLM, scores <= 0.47 on the tiny model).
+                g, w, o = (np.concatenate([np.array(x) for x in xs]) for xs in (got, want, ref["logprobs"][other]))
+                sel = np.abs(w - o) > 0.2
+                ratio = float(np.mean(np.abs(g - w)[sel]) / np.mean(np.abs(g - o)[sel])) if sel.any() else 1.0
+                line += f", own/{other} |Δ| {ratio:.2f} on {int(sel.sum())} tokens"
+                passed &= sel.sum() >= 10 and ratio < (0.6 if tol else 0.9)
             ok &= passed
             print(line + ("  ok" if passed else "  FAIL"))
         leak = max(float(np.max(np.abs(np.array(a) - np.array(b)))) for a, b in zip(v["alone"], v["logprobs"]["0"]))
@@ -408,7 +596,8 @@ def compare(out):
         same = np.mean([a == b for s in e for a, b in zip(e[s], g[s])])
         diff = np.mean([a != b for s in e if s != "0" for a, b in zip(e[s], e["0"])])
         print(f"bf16 greedy continuations: eager == graphs for {same:.0%}; steered != unsteered for {diff:.0%}")
-    print("ALL OK" if ok else "MISMATCH")
+    ok &= ran > 0  # a held-to-tolerance run must exist: a crashed run is not a pass
+    print("ALL OK" if ok else ("MISMATCH" if ran else "MISMATCH: no held-to-tolerance run produced output"))
     return ok
 
 
@@ -424,5 +613,7 @@ if __name__ == "__main__":
     else:
         if cmd == "teacher":
             teacher(out)
+        elif cmd == "capture":
+            sys.exit(0 if capture(out) else 1)
         else:
             sys.exit(0 if compare(out) else 1)
