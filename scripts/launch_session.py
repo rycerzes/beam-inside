@@ -11,8 +11,10 @@ Variants: nvfp4 = the default NVFP4 checkpoint on 4x rtx-pro-6000, routed expert
 activations); fp8 = the FP8 checkpoint on 8x rtx-pro-6000 with the Triton MoE backend, as in the vLLM recipe.
 
 --repo is a private dataset repo (created private if missing). The real run downloads the sweep units from it and
-uploads every phase's results to it as they finish, so a timeout loses at most the wave in flight. The job timeout
-is the hard cost cap: hours x the flavor's hourly price. The session stops starting new waves 25 minutes before it.
+uploads every phase's results to it as they finish, so a timeout loses at most the wave in flight. With --hours,
+the job timeout is a hard cost cap (hours x the flavor's hourly price) and the session stops starting new waves 25
+minutes before it. Without it there is no cap: HF Jobs would apply its 30-minute default, so the timeout is set to
+one day and the session never stops early; watch spend with scripts/watch_job.py.
 
 Code ships inside the command; the HF token goes to the job as a secret (model download and result upload).
 """
@@ -34,7 +36,7 @@ PRICE = {"rtx-pro-6000": 2.75, "rtx-pro-6000x4": 11.0, "rtx-pro-6000x8": 22.0}
 parser = argparse.ArgumentParser()
 parser.add_argument("mode", choices=["rehearsal", "real"])
 parser.add_argument("--repo", required=True)
-parser.add_argument("--hours", type=float, default=3.0)
+parser.add_argument("--hours", type=float, help="hard cap; omit for no cap (1-day timeout, watch_job.py warnings)")
 parser.add_argument("--variant", choices=list(VARIANTS), default="nvfp4")
 parser.add_argument("--phases", default="sanity,stats,calib,effort,sweep")
 parser.add_argument("--session-args", default="", help="extra session.py flags, e.g. '--max-model-len 16384'")
@@ -71,7 +73,8 @@ python3 session.py --model out/ckpt_bf16 --tiny --out run --upload REPO --budget
     capture_rows = 256
 else:
     model, flavor, tp, moe = VARIANTS[args.variant]
-    hours = args.hours
+    hours = args.hours or 24.0
+    budget = int(hours * 60 - 25) if args.hours else 10**6
     for src in ("data/sweep/units.npz", "data/sweep/units.jsonl", "data/effort2/inputs.pt"):
         if "sweep" in args.phases or "effort2" in src:
             api.upload_file(path_or_fileobj=str(ROOT / src), path_in_repo=f"inputs/{pathlib.Path(src).name}",
@@ -83,13 +86,16 @@ else:
         mmlu = "--mmlu-arms in/inputs/mmlu_arms.json"
     script = setup + f"""python3 -c "from huggingface_hub import snapshot_download as s; s('{args.repo}', repo_type='dataset', allow_patterns=['inputs/*'], local_dir='in')"
 python3 session.py --model {model} --tp {tp} --moe-backend {moe} --units in/inputs/units.npz --meta in/inputs/units.jsonl --out run \\
-    --upload {args.repo} --budget-min {int(hours * 60 - 25)} --phases {args.phases} \\
+    --upload {args.repo} --budget-min {budget} --phases {args.phases} \\
     --effort2-inputs in/inputs/inputs.pt {mmlu} {args.session_args}
 """
     capture_rows = 4096  # ~2.4 GB per GPU at Beam's size: 91 questions x 9 efforts x 5 positions per dump
 
 minutes = int(hours * 60)
-print(f"{flavor} for at most {minutes} min = ${PRICE[flavor] * hours:.2f} cap")
+if args.mode == "real" and not args.hours:
+    print(f"{flavor} at ${PRICE[flavor]:.2f}/h, NO cost cap (1-day timeout); watch it with scripts/watch_job.py")
+else:
+    print(f"{flavor} for at most {minutes} min = ${PRICE[flavor] * hours:.2f} cap")
 job = api.run_job(image=IMAGE, command=["bash", "-c", script], flavor=flavor, timeout=f"{minutes}m",
                   secrets={"HF_TOKEN": get_token()},
                   env={"VLLM_USE_V2_MODEL_RUNNER": "0", "HF_XET_HIGH_PERFORMANCE": "1", "PYTHONUNBUFFERED": "1",
