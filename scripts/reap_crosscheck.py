@@ -8,8 +8,9 @@
 
 REAP kept the 16 highest-saliency experts in each 32-expert routing group (saliency from ~925k calibration tokens
 "weighted toward coding and agent use"); its card predicts losses on "multilingual text or niche knowledge". Each swept
-expert gets categories from its steered direction's two poles (24 lens tokens, from the weights alone; plus the
-words its pushes made Beam say, for the topical categories). Categories were fixed before looking at `kept`:
+expert gets categories from its steered direction's lens tokens (from the weights alone; plus the words its pushes
+made Beam say, for the topical categories). ranked_matched.jsonl carries the + side's 12 tokens on both pole rows, so
+the token categories describe the + side only. Categories were fixed before looking at `kept`:
 
 - multilingual: >= 50% of the lens tokens contain a letter outside Latin script
 - code: >= 50% of the lens tokens look like code (brackets, operators, snake/camel case, file or markup syntax,
@@ -17,7 +18,8 @@ words its pushes made Beam say, for the topical categories). Categories were fix
 - health / law / history (exploratory, keyword stems): >= 2 distinct stems among lens + steered-theme words
 
 With --beam-labels (self_label.py on pole_rows.py rows), each expert also gets the subjects Beam gave its coherent
-poles, and every subject is tested the same way.
+poles, and every subject is tested the same way. --plus-only keeps + pole labels: - pole labels were made from
+the + side's tokens too, so they relabel the same tokens and can only add a second subject to an expert.
 
 Kept rate per category against a null that shuffles `kept` within each (layer, group) block, which preserves REAP's
 exact 16-of-32 constraint. Also the within-layer rank correlation of REAP saliency with each token fraction.
@@ -38,6 +40,7 @@ parser.add_argument("run", type=pathlib.Path)
 parser.add_argument("reap", type=pathlib.Path)
 parser.add_argument("--verdicts", type=pathlib.Path, help="judge verdicts (judge_score.py --out) for a trusted subset")
 parser.add_argument("--beam-labels", type=pathlib.Path, help="Beam's pole labels with subjects (self_label.py)")
+parser.add_argument("--plus-only", action="store_true", help="Beam labels of + poles only (see above)")
 parser.add_argument("--shuffles", type=int, default=10000)
 parser.add_argument("--out", type=pathlib.Path)
 args = parser.parse_args()
@@ -133,6 +136,8 @@ beam_subjects = collections.defaultdict(list)
 if args.beam_labels:
     by_expert = collections.defaultdict(set)
     for r in map(json.loads, open(args.beam_labels)):
+        if args.plus_only and not r["id"].endswith("_+"):
+            continue
         if r["name"] and r.get("coherent") is True and r.get("subject"):
             L, E, _ = r["id"].split("_")
             by_expert[(int(L[1:]), int(E[1:]))].add(r["subject"])

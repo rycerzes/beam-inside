@@ -15,6 +15,10 @@ description); LABELS are Beam's pole labels. Reports:
 2. Beam's coherence flag: does "coherent" predict that the pole is steering-significant, and that the judge picks its
    steered output (Fisher exact, one-sided)? Poles Beam could not label (thinking ran to the cap) are reported apart.
 3. Coherence rate by 8-layer band over every labelled pole, and the subject counts.
+
+--plus-only keeps + poles only. ranked_matched.jsonl carries the unit's lens (what its + push promotes) on both pole
+rows, so every - pole was judged with, and labelled from, the + side's tokens: only + poles test a label against the
+direction that was pushed.
 """
 
 import argparse
@@ -31,6 +35,7 @@ parser.add_argument("token_answers", type=pathlib.Path)
 parser.add_argument("beam_answers", type=pathlib.Path)
 parser.add_argument("labels", type=pathlib.Path)
 parser.add_argument("--out", type=pathlib.Path)
+parser.add_argument("--plus-only", action="store_true", help="+ poles only (see above)")
 args = parser.parse_args()
 
 
@@ -38,10 +43,10 @@ def pole_id(k):
     return f"L{k['layer']}_E{k['expert']}_{k['pole']}"
 
 
-key = {k["id"]: k for k in map(json.loads, open(args.key))}
+key = {k["id"]: k for k in map(json.loads, open(args.key)) if not args.plus_only or k["pole"] == "+"}
 tok = {r["id"]: r for r in map(json.loads, open(args.token_answers)) if r.get("choice")}
 beam = {r["id"]: r for r in map(json.loads, open(args.beam_answers)) if r.get("choice")}
-labels = {r["id"]: r for r in map(json.loads, open(args.labels))}
+labels = {r["id"]: r for r in map(json.loads, open(args.labels)) if not args.plus_only or r["id"].endswith("_+")}
 done = {i: r for i, r in labels.items() if r["name"]}
 
 
