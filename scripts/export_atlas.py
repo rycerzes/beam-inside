@@ -25,6 +25,7 @@ import collections
 import gzip
 import json
 import pathlib
+import re
 
 import numpy as np
 import pyarrow as pa
@@ -68,14 +69,63 @@ def tokens(lens):
     return [readable(t) for t in lens or []]
 
 
-def split(text):
-    """Beam's harmony output -> (analysis, final); either may be empty."""
-    analysis, _, rest = text.partition("<|end|>")
-    analysis = analysis.removeprefix("<|channel|>analysis<|message|>")
-    final = rest.split("<|message|>", 1)[1] if "<|message|>" in rest else ""
-    if "<|channel|>" not in text[:12]:  # no analysis channel opened (prompt ended inside it, or broken output)
-        analysis, final = text.split("<|end|>")[0], final
-    return analysis.strip(), final.removesuffix("<|return|>").strip()
+SPECIAL = re.compile(r"<\|[a-z_]+\|>")
+TERMINATORS = ("<|end|>", "<|return|>", "<|call|>")
+LOOP_DISTINCT4 = 0.5  # unsteered answers sit at 0.72-1.0; a repeating loop drives the distinct-4-gram share far lower
+
+
+def harmony(text, finish, distinct4):
+    """Parse Beam's harmony output into (analysis, final, status, broken).
+
+    Messages are `<|start|>assistant<|channel|>NAME<|message|>BODY<|end|>`; the first one has no `<|start|>` (the prompt
+    ends with it) and, when the prompt already opened the analysis channel, no header either. `final` is the body of the
+    last message on the final channel; every analysis body is thinking. A message on any other channel name ("final?xml",
+    "inal", a tool call), a special token inside a body, or a tool-call terminator is a format break. Status, first match:
+      format    the push broke the reply format (see above)
+      loop      ran to the token budget repeating itself (distinct-4-gram share below LOOP_DISTINCT4)
+      budget    hit the token budget while answering (the answer was still going)
+      thinking  hit the token budget before answering
+      finished  stopped with an answer
+      no-answer stopped without one
+    """
+    analysis, final, other, broken = [], None, [], False
+    for i, seg in enumerate(text.split("<|start|>")):
+        if i:  # tokenizer spacing variants (" assistant", " final") are the same message
+            seg = seg.lstrip().removeprefix("assistant").lstrip()
+        if seg.startswith("<|channel|>") and "<|message|>" in seg:
+            header, body = seg[len("<|channel|>"):].split("<|message|>", 1)
+            channel = SPECIAL.sub(" ", header).strip()
+            if channel not in ("analysis", "final"):  # "final?xml", "inal", "commentary to=...", "final <|constrain|>"
+                channel, broken = "", True
+        elif i == 0:  # the prompt already opened the analysis channel
+            channel, body = "analysis", seg
+        else:
+            channel, body, broken = "", seg, True
+        if "<|call|>" in body:
+            broken = True
+        for t in TERMINATORS:
+            body = body.split(t, 1)[0]
+        if SPECIAL.search(body):
+            broken = True
+        body = SPECIAL.sub(lambda m: "⟨" + m.group(0)[2:-2] + "⟩", body).strip()
+        if channel == "analysis":
+            analysis.append(body)
+        elif channel == "final":
+            final = body
+        elif body:
+            other.append(body)
+    if final is None and broken and other:
+        final = other[-1]  # show what Beam wrote instead of an answer, with its special tokens marked
+    final = final or ""
+    if broken:
+        status = "format"
+    elif finish == "length" and distinct4 is not None and distinct4 < LOOP_DISTINCT4:
+        status = "loop"
+    elif finish == "length":
+        status = "budget" if final else "thinking"
+    else:
+        status = "finished" if final else "no-answer"
+    return "\n\n".join(a for a in analysis if a), final, status, broken
 
 
 config = json.loads(pathlib.Path("meta/config.json").read_text())
@@ -90,16 +140,18 @@ write("steering/units", [{"unit": u["unit"], "kind": u["kind"], "layer": u["laye
 outputs = []
 for path in sorted(MAIN.glob("sweep_*.jsonl.gz")):
     for r in jsonl(path):
-        analysis, final = split(r["text"])
+        analysis, final, status, _ = harmony(r["text"], r["finish"], r["distinct4"])
         outputs.append({"unit": r["unit"], "prompt": r["prompt"], "dose": r["dose"], "dose_eff": r["dose_eff"],
                         "dnll": r.get("dnll"), "n_tokens": r["n"], "finish": r["finish"], "distinct4": r["distinct4"],
-                        "analysis_len": r.get("analysis_len"), "analysis": analysis, "final": final})
+                        "analysis_len": r.get("analysis_len"), "status": status, "analysis": analysis, "final": final,
+                        "raw": r["text"]})
 outputs.sort(key=lambda r: (r["unit"], r["prompt"], r["dose"]))
 write("steering/outputs", outputs)
 baseline = {}
 for r in jsonl(MAIN / "baseline.jsonl.gz"):
-    baseline[r.get("prompt", "effort")] = split(r["text"])
-write("steering/baseline", [{"prompt": p, "analysis": a, "final": f} for p, (a, f) in baseline.items()])
+    a, f, st, _ = harmony(r["text"], r["finish"], r.get("distinct4"))
+    baseline[r.get("prompt", "effort")] = {"analysis": a, "final": f, "status": st, "n_tokens": r["n"]}
+write("steering/baseline", [{"prompt": p, **b} for p, b in baseline.items()])
 
 # ---- poles: one row per expert write direction and sign ----------------------------------------------------------
 ranked = jsonl(MAIN / "ranked_matched.jsonl")
@@ -194,12 +246,12 @@ score = json.loads((DATA / "mmlu/score.json").read_text())
 def effort_rows(path, extra=()):
     out = []
     for r in jsonl(path):
-        a, f = split(r["text"])
+        a, f, st, _ = harmony(r["text"], r["finish"], r.get("distinct4"))
         # requests that hit the token cap never closed the analysis channel: all their tokens were thinking
         think = r["analysis_len"] if r.get("analysis_len") is not None else r["n"]
         out.append({**{k: r.get(k) for k in ("q", "effort", "gold", "n", "finish", "distinct4", "analysis_len",
                                                "correct", "answer", *extra)}, "think_tokens": think,
-                    "analysis": a, "final": f})
+                    "status": st, "analysis": a, "final": f})
     return out
 
 
@@ -311,7 +363,8 @@ if not args.no_explorer:
                 "pct": p["pct_vs_matched_controls"], "null": p["null"], "dnll": p["dnll"], "theme": p["theme_words"],
                 "judge": p["judge_correct_token_label"], "judge_beam": p["judge_correct_beam_label"],
                 "out": [{"prompt": o["prompt"], "dose": o["dose"], "analysis": clip(o["analysis"], 360),
-                         "final": clip(o["final"], 480), "finish": o["finish"]}
+                         "final": clip(o["final"], 480), "finish": o["finish"], "status": o["status"],
+                         **({"raw": clip(o["raw"], 600)} if o["status"] in ("format", "loop") else {})}
                         for o in by_unit[p["unit"]] if o["dose"] in doses or (o["prompt"] == "effort" and
                                                                            (o["dose"] > 0) == (p["pole"] == "+"))]}
             if p["id"] in GALLERY:
@@ -327,7 +380,7 @@ if not args.no_explorer:
     (ex / "index.json").write_text(json.dumps({"fields": ["id", "name", "subject", "coherent", "sig", "judge",
                                                           "verified", "tokens"], "rows": index},
                                               ensure_ascii=False, separators=(",", ":")))
-    (ex / "baseline.json").write_text(json.dumps({p: {"analysis": a, "final": f} for p, (a, f) in baseline.items()},
+    (ex / "baseline.json").write_text(json.dumps(baseline,
                                                  ensure_ascii=False))
     (ex / "prompts.json").write_text(json.dumps(PROMPTS))
     (ex / "gallery.json").write_text(json.dumps([gallery[i] for i in GALLERY], ensure_ascii=False))
