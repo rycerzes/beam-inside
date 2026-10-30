@@ -1,10 +1,10 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["numpy", "torch", "pyarrow"]
+# dependencies = ["numpy", "torch", "pyarrow", "huggingface_hub"]
 # ///
 """How often Beam selects each expert at each reasoning-effort setting, from the effort captures, for the explorer.
 
-    uv run scripts/effort_routing.py RUN_DIR OUT.json [--atlas data/export/atlas]
+    uv run scripts/effort_routing.py RUN_DIR OUT.json [--atlas data/export/atlas] [--routes ROUTES.json --route-questions 24]
 
 RUN_DIR holds effort_capture_*.pt (200 GSM8K questions x efforts 2-1000, router logits at five positions). Selection
 is recomputed the way Beam routes (as in effort_analysis.py): sigmoid(logit) + e_score_correction_bias, the top 4 of
@@ -12,6 +12,10 @@ is recomputed the way Beam routes (as in effort_analysis.py): sigmoid(logit) + e
 (think_start), OUT holds per effort the share of questions that selected each expert, as integers in thousandths
 [49 MoE layers][256], plus per effort the GSM8K accuracy and median thinking tokens (from the atlas's
 effort/gsm8k_dial) and the competition-math dial rows where they exist.
+
+With --routes, ROUTES.json holds, for the first N questions, the 8 experts Beam picked in every MoE layer at each
+effort and position (routes[kind][effort][question] = [49][8], each layer's experts sorted by router score), with the
+question text and answer from openai/gsm8k (MIT).
 """
 
 import argparse
@@ -26,6 +30,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("run", type=pathlib.Path)
 parser.add_argument("out", type=pathlib.Path)
 parser.add_argument("--atlas", type=pathlib.Path, default=pathlib.Path("data/export/atlas"))
+parser.add_argument("--routes", type=pathlib.Path)
+parser.add_argument("--route-questions", type=int, default=24)
 args = parser.parse_args()
 BF16 = pathlib.Path("data/bf16")
 KINDS = ("n_last", "sys_end", "think_start", "thought1", "thought2")
@@ -43,8 +49,9 @@ efforts = sorted({k[1] for k in keys})
 n = np.array([k[1] for k in keys])
 
 
-def select(kind):
-    """[MoE layers, len(keys), 256] bool: Beam's top-8 choice at this position."""
+def select(kind, ranked=False):
+    """[MoE layers, len(keys), 256] bool: Beam's top-8 choice at this position (ranked: [MoE layers, len(keys), 8]
+    expert ids, best first)."""
     k = KINDS.index(kind)
     logits = []
     for key in keys:
@@ -52,6 +59,7 @@ def select(kind):
         logits.append(caps[f]["router"][:, r].float())
     logits = torch.stack(logits, 1).numpy()  # [52, S, E]
     out = np.zeros((len(MOE), len(keys), logits.shape[-1]), dtype=bool)
+    order = np.zeros((len(MOE), len(keys), K), dtype=int)
     for i, L in enumerate(MOE):
         bias = np.load(BF16 / f"model.layers.{L}.mlp.gate.e_score_correction_bias.npy")
         s = 1 / (1 + np.exp(-logits[L].astype(np.float64))) + bias
@@ -60,8 +68,9 @@ def select(kind):
         mask = np.zeros_like(gscore, dtype=bool)
         np.put_along_axis(mask, keep, True, -1)
         s = np.where(np.repeat(mask, s.shape[1] // G, -1), s, -np.inf)
-        np.put_along_axis(out[i], np.argsort(-s, -1)[:, :K], True, -1)
-    return out
+        order[i] = np.argsort(-s, -1)[:, :K]
+        np.put_along_axis(out[i], order[i], True, -1)
+    return order if ranked else out
 
 
 result = {"layers": MOE, "efforts": efforts, "questions": len(keys) // len(efforts), "rates": {}}
@@ -86,4 +95,19 @@ for e in (8, 32, 128, 512):
     result["competition_math"][str(e)] = {"n": len(rs), "acc": round(float(np.mean([bool(r["correct"]) for r in rs])), 3),
                                           "median_think": float(np.median([r["think_tokens"] for r in rs]))}
 args.out.write_text(json.dumps(result, separators=(",", ":")))
+
+if args.routes:
+    from huggingface_hub import hf_hub_download
+
+    table = pq.read_table(hf_hub_download("openai/gsm8k", "main/test-00000-of-00001.parquet", repo_type="dataset"))
+    qs = sorted({k[0] for k in keys})[: args.route_questions]
+    text = table.column("question").to_pylist()
+    gold = [a.split("####")[-1].strip() for a in table.column("answer").to_pylist()]
+    routes = {"layers": MOE, "efforts": efforts, "questions": [{"q": q, "text": text[q], "gold": gold[q]} for q in qs],
+              "routes": {}}
+    for kind in ("think_start", "n_last"):
+        order = select(kind, ranked=True)
+        routes["routes"][kind] = {str(e): [order[:, keys.index((q, e))].tolist() for q in qs] for e in efforts}
+    args.routes.write_text(json.dumps(routes, separators=(",", ":")))
+    print(f"routes for {len(qs)} questions -> {args.routes} ({args.routes.stat().st_size / 1e3:.0f} kB)")
 print(f"{len(keys)} requests, efforts {efforts}; gsm8k {gsm}; -> {args.out} ({args.out.stat().st_size / 1e3:.0f} kB)")
