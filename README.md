@@ -3,24 +3,28 @@
 By **Swapnil Dutta** (swappy · [rycerzes on Hugging Face](https://huggingface.co/rycerzes) · [GitHub](https://github.com/rycerzes)).
 
 A map of all 12,544 routed experts in [Beam-1.0-501B-A23B](https://huggingface.co/reflection/Beam-1.0-501B-A23B),
-built by pushing each one inside the running model and checking what changes against random controls, then labelled
-by Beam itself. Banning the experts Beam labelled *law* drops MMLU-Pro law by 13 points and leaves every other
+12,066 of them pushed inside the running model and checked against random controls (478 lost their data to a time
+limit), then labelled by Beam itself. Banning the experts Beam labelled *law* drops MMLU-Pro law by 13 points and leaves every other
 subject where it was.
 
 - **Explorer:** [huggingface.co/spaces/rycerzes/inside-beam](https://huggingface.co/spaces/rycerzes/inside-beam)
   (search any expert, read Beam's label for it and what Beam says when it is pushed)
 - **Data:** [rycerzes/beam-expert-atlas](https://huggingface.co/datasets/rycerzes/beam-expert-atlas)
-- **Write-up:** [rycerz.es/blog/inside-beam](https://rycerz.es/blog/inside-beam)
+- **Write-up:** coming soon on [rycerz.es](https://rycerz.es); until then, the research log below
 - **Research log:** [research_log.md](research_log.md), dated entries including what failed and what we corrected
 - **Code:** this repo; the vLLM plugin is [`steer/`](steer/)
+
+[![Inside Beam: one token's path through Beam's 49 expert layers](docs/inside-beam.png)](https://huggingface.co/spaces/rycerzes/inside-beam)
 
 Built for Reflection's [Build with Beam](https://huggingface.co/reflection/Beam-1.0-501B-A23B/discussions/5) contest.
 
 ## What we found
 
-Every number below is against a matched control. The details, and what did not work, are in the write-up.
+Each effect below is compared against a matched control. The details, and what did not work, are in the
+[research log](research_log.md).
 
-**1. Beam's own labels for its experts are causally right.** We banned the experts Beam labelled with a subject
+**1. Banning the experts Beam labelled with a subject hurts that subject, and only that subject (three subjects
+tested).** We banned the experts Beam labelled with a subject
 (exactly, through the router's correction bias) and scored all 12,032 MMLU-Pro questions, paired against a ban of
 the same number of random experts with matched routing load. Base accuracy is 62.3% (no thinking, letter scoring).
 
@@ -28,26 +32,27 @@ the same number of random experts with matched routing load. Base accuracy is 62
 |---|---|---|---|
 | law (143) | **−13.4 pts** (p = 1e-21) | +0.2 (ns) | −0.4 |
 | health (165) | **−6.5 pts** (p = 4e-8) | −0.1 (ns) | −0.2 |
-| math (588) | **−8.7 pts** (p = 3e-14) | physics −9.2, chemistry −7.9, economics −6.2, business −4.8; verbal subjects ±1 | −0.3 |
+| math (588) | **−8.7 pts** (p = 3e-14) | physics −9.2, chemistry −7.9, economics −6.2, business −4.8, health −3.7, law −2.2; history, philosophy, psychology ±1 | −0.3 |
 
 The "math" experts carry quantitative work across every number-heavy subject, not math as a topic.
 
 **2. Steering finds real units, mostly in the middle of the network.** We pushed each expert's main write directions
-into the residual stream of the live model at calibrated doses (12,920 units, 832 of them random-direction
+into the residual stream of the live model at calibrated doses (12,920 units with data, including random-direction
 controls) and asked whether the outputs drift toward a theme more than controls that move the model by the same
 amount. 2,092 expert directions pass, against 1,128 expected by chance; they concentrate in layers 24–39. A blind
-judge given three steered outputs picks the right one from the label (the tokens the pushed direction promotes) 70%
+judge given three steered outputs picks the right one from the expert's top tokens (what the pushed direction promotes) 70%
 of the time for those directions (chance 33%, random directions 49%), and 98.7% of the time on the 670 items it
-marked as clear matches. Given a label from the other side of the same direction, it is at chance (35%).
+marked as clear matches. The judge is DeepSeek-V4-Flash via HF Inference Providers (no thinking); pilots used Claude
+Sonnet 5.5, Qwen3.8-Flash-Next and Beam itself. Given a label from the other side of the same direction, it is at chance (35%).
 
 **3. Beam knows which of its experts are readable.** Beam named 10,926 expert directions from their top tokens and
 flagged whether each label was coherent. Coherent ones pass the steering test 3.5x as often (19.5% vs 5.6%), although
-the flag never saw any steering. Coherence rises with depth, from 29% in layers 0–7 to 90% in layers 32–39. With
+the flag never saw any steering. Coherence rises with depth, from 29% in MoE layers 3–7 to a peak of 90% in layers 32–39. With
 Beam's labels in place of raw tokens, the judge scores 71% (vs 49% for random directions).
 
 **4. The reasoning-effort setting is a number Beam reads early and clamps.** A single direction reads the effort N
-from the residual at N's last digit with R² = 0.999 (layer 12). Effort values outside the trained 8–512 range read as
-clamped (N = 2 reads as ~13). On 100 AIME 2024/2025 and AMC 2023 problems at effort 8, adding the difference
+from the residual at N's last digit with R² = 0.999 (layer 12). Values below the trained 8–512 range read as the bottom
+of the scale (at layer 12, N = 2 reads as about 11). On 100 AIME 2024/2025 and AMC 2023 problems at effort 8, adding the difference
 between the digit's mean representation at N = 512 and at N = 8 lengthens thinking 1.2x relative to a random vector
 of the same norm (p = 5e-8). Low effort is fragile: re-routing 37 "effort experts" on the prompt (19 forced in, 18
 banned) or 37 random experts both lift effort-8 accuracy from 80% to 91–94%, the same as raising the dial to 32, so
@@ -179,7 +184,8 @@ a global index configured.
 ## Limitations
 
 - One greedy sample per prompt and problem; the competition-math arms are 100 problems.
-- Early layers (0–23) are underdosed in effect terms: their few "significant" directions are at chance with the judge,
+- Early MoE layers (3–23) are underdosed in effect terms: their few "significant" directions are at or near chance
+  with the judge (27–42% vs 33%),
   so treat them as false positives of the theme metric. Late layers (48+) collapse into repetition at the doses
   needed, and 46% of their directions have no fair control.
 - An earlier pilot sweep (not used for the numbers above, not in the dataset) ran with vLLM's prefix caching on, so
@@ -217,8 +223,8 @@ and that you check a label by steering it.
 and its [NVFP4 release](https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4) (Apache-2.0), served with
 [vLLM](https://github.com/vllm-project/vllm) following its [Beam recipe](https://recipes.vllm.ai/reflection/Beam-1.0-501B-A23B);
 transformers' Beam implementation for the reference checks; HF Jobs for the GPU runs; HF Inference Providers for
-Beam's labels (Baseten) and the judge, DeepSeek-V4-Flash (DeepInfra). Pilot judges: Claude Sonnet 5.5 and
-Qwen3.8-Flash-Next.
+Beam's labels (Baseten) and the judge, DeepSeek-V4-Flash (DeepInfra). Pilot judges: Claude Sonnet 5.5,
+Qwen3.8-Flash-Next and Beam itself.
 
 **Data.** [MMLU-Pro](https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro), [GSM8K](https://huggingface.co/datasets/openai/gsm8k),
 [AIME 2024](https://huggingface.co/datasets/HuggingFaceH4/aime_2024), [AIME 2025](https://huggingface.co/datasets/MathArena/aime_2025),

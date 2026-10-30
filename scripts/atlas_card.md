@@ -79,7 +79,7 @@ greedy decoding, prefix caching off.
 | `judge_items` | 4,091 | blind three-way test (DeepSeek-V4-Flash): which of three poles' outputs matches a label |
 | `ban_arms` | 8 | expert lists for the MMLU-Pro arms (`L{layer}_E{expert}`) |
 | `mmlu_pro_bans` | 96,256 | per question and arm: prediction and the ten letters' log-probabilities |
-| `effort_gsm8k_dial` | 900 | GSM8K at efforts 2–1000 |
+| `effort_gsm8k_dial` | 900 | GSM8K generations, 100 questions × efforts 2–1000 (the captures cover 200 questions) |
 | `effort_gsm8k_steer` | 1,200 | GSM8K with the effort direction steered at layers 26 / 36 |
 | `effort_competition_math` | 1,400 | AIME 2024, AIME 2025, AMC 2023 under 14 effort arms |
 | `calibration_*` | | residual norms per layer (WikiText-103 test, statistics only) and random-direction dose response |
@@ -153,14 +153,14 @@ import pandas as pd
 repo = "rycerzes/beam-expert-atlas"
 idx = pd.read_parquet(hf_hub_download(repo, "captures/gsm8k_effort_index.parquet", repo_type="dataset"))
 rows = idx[(idx.kind == "n_last") & (idx.file == "gsm8k_effort_00.safetensors")]
-with safe_open(hf_hub_download(repo, "captures/gsm8k_effort_00.safetensors", repo_type="dataset"), "np") as f:
-    x = f.get_slice("resid")[12, :, :]  # layer 12, every row of this file (BF16 needs framework="pt" for numpy-free use)
+with safe_open(hf_hub_download(repo, "captures/gsm8k_effort_00.safetensors", repo_type="dataset"), framework="pt") as f:
+    x = f.get_slice("resid")[12].float().numpy()  # layer 12, every row of this file (BF16 -> float32)
 ```
 
 ## Limitations
 
 - One greedy sample per prompt and problem.
-- Layers 0–23 are underdosed in effect terms; their few significant poles are at chance with the judge. Layers 48+
+- MoE layers 3–23 are underdosed in effect terms; their few significant poles are at or near chance with the judge. Layers 48+
   collapse at the doses needed and often have no fair control.
 - 478 experts have no sweep data (3 of 79 waves hit the job's time limit).
 - Labels come from an expert's top tokens (what it writes), not from when the router selects it.
