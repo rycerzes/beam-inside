@@ -226,11 +226,10 @@ Qwen3.8-Flash-Next.
 Apache-2.0).
 
 **The site.** Built on Thibaud Frere's [research article template](https://huggingface.co/spaces/tfrere/research-article-template)
-(CC BY 4.0). Its look and interactions borrow from [Neuron Studio](https://huggingface.co/spaces/webml-community/neuron-studio),
-[Neuronary](https://neuronary.org/), [Neuron Personas](https://neuronpersonas.com/),
-[Neuronpedia](https://www.neuronpedia.org/)'s feature maps, Polo Club's
-[Transformer Explainer](https://github.com/poloclub/transformer-explainer) and Martin Alderson's MoE routing
-visualiser. Charts with [D3](https://d3js.org/); the map layout with [UMAP](https://github.com/lmcinnes/umap).
+(CC BY 4.0). The push panel's strength control follows
+[Neuron Studio](https://huggingface.co/spaces/webml-community/neuron-studio), the recipes follow
+[Neuronary](https://neuronary.org/), the map follows [Neuronpedia](https://www.neuronpedia.org/)'s feature maps, and the
+route view follows the data-flow overview of Polo Club's [Transformer Explainer](https://github.com/poloclub/transformer-explainer). Charts with [D3](https://d3js.org/); the map layout with [UMAP](https://github.com/lmcinnes/umap).
 
 **The contest.** Reflection and Hugging Face's [Build with Beam](https://huggingface.co/reflection/Beam-1.0-501B-A23B/discussions/5)
 ([announcement](https://huggingface.co/blog/reflection-beam)). Not affiliated with Reflection.
