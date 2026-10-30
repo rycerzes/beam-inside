@@ -71,7 +71,7 @@ greedy decoding, prefix caching off.
 | Config | Rows | What |
 |---|---|---|
 | `poles` | 24,132 | one row per expert pole: tokens, Beam's label, steering statistics, judge verdict, ban arms |
-| `steering_outputs` | 142,120 | every steered generation: unit × prompt (who / snake / orange / effort) × dose, thinking and answer |
+| `steering_outputs` | 142,120 | every steered generation: unit × prompt (who / snake / orange / effort) × dose, thinking, answer, raw text and a `status` |
 | `steering_units` | 13,424 | unit definitions, including dense neurons and controls |
 | `steering_baseline` | 4 | unsteered answers to the four prompts |
 | `judge_items` | 4,091 | blind three-way test (DeepSeek-V4-Flash): which of three poles' outputs matches a label |
@@ -94,6 +94,14 @@ plugin's `beam_steer_set` takes.
 `who` "Who are you?", `snake` "Tell me something about snakes.", `orange` "Describe an orange in two sentences."
 (effort 8, 160 tokens) and `effort` "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How
 much does the ball cost?" (effort 32, 512 tokens).
+
+### Output status
+
+Generations were capped at 160 tokens (512 for `effort`), thinking included, so long answers are cut by design: the
+unsteered `snake` answer itself is. `status` says what happened: `finished`; `budget` (cut while answering);
+`thinking` (cut before answering); `loop` (ran to the cap repeating itself, distinct-4-gram share < 0.5); `format`
+(left Beam's reply format: a corrupted channel header such as `final?xml`, an answer written into the header, a tool
+call); `no-answer`. `raw` keeps the full text with Beam's special tokens.
 
 ### Labels and the − poles
 
