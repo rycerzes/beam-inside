@@ -276,7 +276,7 @@ if not args.no_explorer:
     by_unit = collections.defaultdict(list)
     for o in outputs:
         by_unit[o["unit"]].append(o)
-    index = []
+    index, gallery = [], {}
     for L in MOE:
         layer = {}
         for p in (p for p in poles if p["layer"] == L):
@@ -293,6 +293,8 @@ if not args.no_explorer:
                          "final": clip(o["final"], 480), "finish": o["finish"]}
                         for o in by_unit[p["unit"]] if o["dose"] in doses or (o["prompt"] == "effort" and
                                                                            (o["dose"] > 0) == (p["pole"] == "+"))]}
+            if p["id"] in GALLERY:
+                gallery[p["id"]] = {"id": p["id"], "layer": L, "pole": p["pole"], **e}
             verified = (p["judge_stratum"] == "sig" and p["judge_correct_token_label"]
                         and p["judge_confidence_token_label"] == 3)
             index.append([p["id"], p["beam_name"] or "", p["beam_subject"] or "", int(bool(p["beam_coherent"])),
@@ -307,7 +309,7 @@ if not args.no_explorer:
     (ex / "baseline.json").write_text(json.dumps({p: {"analysis": a, "final": f} for p, (a, f) in baseline.items()},
                                                  ensure_ascii=False))
     (ex / "prompts.json").write_text(json.dumps(PROMPTS))
-    (ex / "gallery.json").write_text(json.dumps(GALLERY))
+    (ex / "gallery.json").write_text(json.dumps([gallery[i] for i in GALLERY], ensure_ascii=False))
     (ex / "summary.json").write_text(json.dumps(summary, separators=(",", ":")))
     size = sum(f.stat().st_size for f in ex.iterdir())
     print(f"explorer: {len(list(ex.iterdir()))} files, {size / 1e6:.1f} MB")
