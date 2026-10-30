@@ -55,12 +55,14 @@ The "math" experts carry quantitative work across every number-heavy subject, no
 into the residual stream of the live model at calibrated doses (12,920 units, 832 of them random-direction
 controls) and asked whether the outputs drift toward a theme more than controls that move the model by the same
 amount. 2,092 expert directions pass, against 1,128 expected by chance; they concentrate in layers 24–39. A blind
-judge given three steered outputs picks the right one from the expert's label 62% of the time for those directions
-(chance 33%, random experts 40%), and 98.5% of the time on the 681 items it marked as clear matches.
+judge given three steered outputs picks the right one from the label (the tokens the pushed direction promotes) 70%
+of the time for those directions (chance 33%, random directions 49%), and 98.7% of the time on the 670 items it
+marked as clear matches. Given a label from the other side of the same direction, it is at chance (35%).
 
-**3. Beam knows which of its experts are readable.** Beam named 22,335 expert directions from their top tokens and
-flagged whether each label was coherent. Coherent ones pass the steering test 3.2x as often (12.1% vs 3.7%), although
-the flag never saw any steering. Coherence rises with depth, from 28% in layers 0–7 to 90% in layers 32–39.
+**3. Beam knows which of its experts are readable.** Beam named 10,926 expert directions from their top tokens and
+flagged whether each label was coherent. Coherent ones pass the steering test 3.5x as often (19.5% vs 5.6%), although
+the flag never saw any steering. Coherence rises with depth, from 29% in layers 0–7 to 90% in layers 32–39. With
+Beam's labels in place of raw tokens, the judge scores 71% (vs 49% for random directions).
 
 **4. The reasoning-effort setting is a number Beam reads early and clamps.** A single direction reads the effort N
 from the residual at N's last digit with R² = 0.999 (layer 12). Effort values outside the trained 8–512 range read as
@@ -80,7 +82,7 @@ model before anyone builds the pruned checkpoint.
 - **As the subject.** Every intervention runs inside the real 501B model: the NVFP4 release in vLLM on 4x RTX PRO
   6000 (HF Jobs), with our plugin adding per-request residual pushes, router-logit changes, exact expert bans and
   activation capture. About 7 hours on 4 GPUs in total.
-- **As the labeller.** Beam named 22,335 of its own expert directions (name, description, subject, coherent or not)
+- **As the labeller.** Beam named 10,926 of its own expert directions (name, description, subject, coherent or not)
   through HF Inference Providers, and those labels picked the experts for the ban experiments.
 - **As the measuring stick.** Its effort dial, its default identity line and its answers on MMLU-Pro and competition
   math are the outcomes.
@@ -208,6 +210,9 @@ a global index configured.
   it steered only from the assistant turn onwards.
 - 3 of 79 sweep waves were lost to the job's time limit: 478 experts have no steering data.
 - Beam's labels describe what an expert writes, read from its top tokens, not when the router uses it.
+- Labels and the judge test cover the + side of each direction (the side the sweep's lens tokens describe). A first
+  pass also labelled and judged − pushes, but with the + side's tokens; those results are excluded (they sit at
+  chance, as a mismatched label should), and about half of the labelling spend went to them.
 - MMLU-Pro is scored without thinking, so absolute accuracy (62.3%) is below Beam's reported score with thinking.
 - The REAP emulation bans REAP's pruned experts in the NVFP4 model; we did not run the REAP checkpoint itself.
 - None of this was pre-registered.

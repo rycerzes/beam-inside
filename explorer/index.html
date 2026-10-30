@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inside Beam</title>
+<meta name="description" content="A steering-checked map of all 12,544 routed experts in Reflection's Beam-1.0-501B-A23B, labelled by Beam itself.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <p class="kicker">Beam-1.0-501B-A23B · 49 MoE layers × 256 experts</p>
+    <h1>Inside Beam</h1>
+    <p class="lede">We pushed every routed expert inside the running model, checked what changed against random
+      controls, and asked Beam to name each one. Then we banned the experts it named.</p>
+    <nav class="links">
+      <a href="#explore">Explore experts</a>
+      <a href="https://huggingface.co/datasets/rycerzes/beam-expert-atlas">Dataset</a>
+      <a href="https://rycerz.es/blog/inside-beam">Write-up</a>
+      <a href="https://github.com/rycerzes/beam-inside">Code &amp; vLLM plugin</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section id="bans" class="panel">
+    <h2>Ban the experts Beam labelled <em>law</em>, and Beam forgets law</h2>
+    <p class="note">MMLU-Pro accuracy change per subject (points) after exactly removing the experts Beam itself
+      labelled law, health or math, relative to removing the same number of random experts with matched routing load.
+      12,032 questions, paired; base accuracy 62.3% (no thinking).</p>
+    <div id="heatmap" class="figure" role="img" aria-label="Accuracy change by subject for each ban"></div>
+  </section>
+
+  <section class="cards" id="findings"></section>
+
+  <section class="panel two">
+    <div>
+      <h3>Where readable experts live</h3>
+      <p class="note">By depth band. <b>Coherent</b>: Beam judged its own label coherent. <b>Significant</b>: steering
+        moved outputs toward a theme beyond effect-matched random controls. <b>Judge</b>: a blind judge picked the
+        expert's steered output from three, given its label (chance 33%).</p>
+      <div id="depth" class="figure"></div>
+    </div>
+    <div>
+      <h3>What REAP pruning costs, by subject</h3>
+      <p class="note">Banning the 128 experts per layer that the community REAP-255B prune removed (all 12,032
+        questions, vs base). Knowledge subjects fall hardest.</p>
+      <div id="reap" class="figure"></div>
+    </div>
+  </section>
+
+  <section class="panel two">
+    <div>
+      <h3>Beam reads its effort setting early</h3>
+      <p class="note">Held-out R² of log₂(effort) from one direction in the residual at the effort number's last
+        digit, per layer (200 GSM8K questions × efforts 8–512).</p>
+      <div id="effort" class="figure"></div>
+    </div>
+    <div>
+      <h3>…and low effort is fragile</h3>
+      <p class="note">100 AIME 2024/25 + AMC 2023 problems, greedy, starting from effort 8. Gentle prompt-only
+        interventions, with their controls.</p>
+      <div id="arms"></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Verified examples</h2>
+    <p class="note">Experts whose steering passed the controls and that the blind judge matched with full confidence.
+      The quote is Beam answering “Who are you?” while the expert is pushed.</p>
+    <div id="gallery" class="gallery"></div>
+  </section>
+
+  <section id="explore" class="panel">
+    <h2>Explore all experts</h2>
+    <div class="controls">
+      <input id="q" type="search" placeholder="Search Beam's labels, subjects or tokens (e.g. pandemic, law, html)" aria-label="Search">
+      <label><input type="checkbox" id="f-sig"> significant</label>
+      <label><input type="checkbox" id="f-ver"> judge-verified</label>
+      <label><input type="checkbox" id="f-coh"> coherent</label>
+      <select id="f-subj" aria-label="Subject"><option value="">any subject</option></select>
+    </div>
+    <p id="count" class="note"></p>
+    <ol id="results" class="results"></ol>
+
+    <h3>Layer map</h3>
+    <div class="controls">
+      <label>colour by
+        <select id="mode">
+          <option value="sig">steering significant</option>
+          <option value="coh">Beam says coherent</option>
+          <option value="subj">Beam's subject</option>
+          <option value="reap">kept by REAP</option>
+        </select>
+      </label>
+      <span id="legend" class="legend"></span>
+    </div>
+    <div class="gridwrap"><canvas id="grid" width="1024" height="196" aria-label="49 layers by 256 experts"></canvas>
+      <div id="tip" class="tip" hidden></div></div>
+    <p class="note">Rows are MoE layers 3 (top) to 51, columns experts 0–255. Click an expert to open it.</p>
+  </section>
+
+  <section class="panel small">
+    <h3>How this was made</h3>
+    <p>Beam ran in vLLM (NVFP4 weights, 4× RTX PRO 6000 on HF Jobs) with a plugin that adds per-request pushes to the
+      residual stream, router changes and exact expert bans. Each expert's top two write directions, read from its
+      weights, were pushed at doses calibrated per layer on effect (ΔNLL), on three chat prompts and an effort prompt.
+      A direction is significant when its outputs drift toward one theme more than 95% of random-direction controls
+      that move Beam by a similar amount. Beam then named each direction from its top tokens (via HF Inference
+      Providers), and a DeepSeek judge took a blind three-way test. Bans set the router's correction bias to −1000,
+      which removes an expert exactly.</p>
+    <p><b>Limits.</b> One greedy sample per prompt; early layers (0–23) are underdosed and their few hits are at chance
+      with the judge; layers 48+ collapse at the needed dose and often have no fair control; 478 experts lost their
+      sweep data to a time limit; the competition-math arms are 100 problems. Details in the write-up.</p>
+  </section>
+</main>
+
+<dialog id="card" aria-label="Expert">
+  <form method="dialog"><button class="close" aria-label="Close">×</button></form>
+  <div id="card-body"></div>
+</dialog>
+
+<footer class="wrap note">Built for Reflection's Build with Beam contest. Not affiliated with Reflection.
+  Code Apache-2.0; data under the dataset card's terms.</footer>
+<script src="app.js"></script>
+</body>
+</html>
