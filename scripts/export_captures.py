@@ -24,13 +24,12 @@ delta = dirs[unit] * dose_eff * median_resid[layer], added to the residual leavi
 """
 
 import argparse
+import json
 import pathlib
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-import json
-
-import numpy as np
 import torch
 from safetensors.torch import save_file
 
