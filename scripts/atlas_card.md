@@ -44,6 +44,8 @@ configs:
 
 # Beam Expert Atlas
 
+By **Swapnil Dutta** (swappy · [rycerzes on Hugging Face](https://huggingface.co/rycerzes) · [GitHub](https://github.com/rycerzes)).
+
 Every routed expert of [reflection/Beam-1.0-501B-A23B](https://huggingface.co/reflection/Beam-1.0-501B-A23B)
 (49 MoE layers × 256 experts), pushed inside the running model and checked against random controls, labelled by
 Beam itself, plus expert-ban experiments on MMLU-Pro and Beam's internal activations across reasoning-effort
@@ -171,3 +173,15 @@ Released under Apache-2.0, like Beam. Generations are Beam's (Apache-2.0). Quest
 [math-ai/amc23](https://huggingface.co/datasets/math-ai/amc23); no question text is copied, though Beam's outputs may
 restate a problem. WikiText-103 (CC BY-SA) was used only for the residual-norm statistics. Routing counts for the ban controls come
 from the REAP calibration file in mrfakename/Beam-1.0-REAP-255B-A23B (Apache-2.0).
+
+## Citation
+
+```bibtex
+@misc{dutta2026insidebeam,
+  title        = {Inside Beam: steering, labelling and banning the experts of Beam-1.0-501B},
+  author       = {Dutta, Swapnil},
+  year         = {2026},
+  howpublished = {\url{https://huggingface.co/spaces/rycerzes/inside-beam}},
+  note         = {Code: https://github.com/rycerzes/beam-inside; data: https://huggingface.co/datasets/rycerzes/beam-expert-atlas}
+}
+```

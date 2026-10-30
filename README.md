@@ -1,5 +1,7 @@
 # Inside Beam
 
+By **Swapnil Dutta** (swappy · [rycerzes on Hugging Face](https://huggingface.co/rycerzes) · [GitHub](https://github.com/rycerzes)).
+
 A map of all 12,544 routed experts in [Beam-1.0-501B-A23B](https://huggingface.co/reflection/Beam-1.0-501B-A23B),
 built by pushing each one inside the running model and checking what changes against random controls, then labelled
 by Beam itself. Banning the experts Beam labelled *law* drops MMLU-Pro law by 13 points and leaves every other
@@ -233,6 +235,38 @@ route view follows the data-flow overview of Polo Club's [Transformer Explainer]
 
 **The contest.** Reflection and Hugging Face's [Build with Beam](https://huggingface.co/reflection/Beam-1.0-501B-A23B/discussions/5)
 ([announcement](https://huggingface.co/blog/reflection-beam)). Not affiliated with Reflection.
+
+## References
+
+- Cho, A., Kim, G. C., Karpekov, A., et al. (2024). Transformer Explainer: Learning LLM Transformers with Interactive Visual Explanation and Experimentation. [arXiv:2408.04619](https://arxiv.org/abs/2408.04619).
+- Cobbe, K., Kosaraju, V., Bavarian, M., et al. (2021). Training Verifiers to Solve Math Word Problems (GSM8K). [arXiv:2110.14168](https://arxiv.org/abs/2110.14168).
+- Dahlke, R., Klagges, H., Zecha, D., Merkel, B., et al. (2025). Mixture of Tunable Experts: Behavior Modification of DeepSeek-R1 at Inference Time. [arXiv:2502.11096](https://arxiv.org/abs/2502.11096).
+- Fayyaz, M., Modarressi, A., Deilamsalehy, H., Dernoncourt, F., et al. (2025). Steering MoE LLMs via Expert (De)Activation. [arXiv:2509.09660](https://arxiv.org/abs/2509.09660).
+- Frere, T. (2025). Research Article Template. [Hugging Face Space](https://huggingface.co/spaces/tfrere/research-article-template).
+- Goodfire (2026). Neural Networks Are Already Clean. [already-clean.goodfire.com](https://already-clean.goodfire.com/).
+- Gur-Arieh, Y., Mayan, R., Agassy, C., et al. (2025). Enhancing Automated Interpretability with Output-Centric Feature Descriptions. [arXiv:2501.08319](https://arxiv.org/abs/2501.08319).
+- Herbst, J., Wermter, S., Lee, J. H. (2026). The Expert Strikes Back: Interpreting Mixture-of-Experts Language Models at Expert Level. [arXiv:2604.02178](https://arxiv.org/abs/2604.02178).
+- Kwon, W., Li, Z., Zhuang, S., et al. (2023). Efficient Memory Management for Large Language Model Serving with PagedAttention (vLLM). [arXiv:2309.06180](https://arxiv.org/abs/2309.06180).
+- Li, B. Z., Guo, Z. C., Huang, V., et al. (2025). Training Language Models to Explain Their Own Computations. [arXiv:2511.08579](https://arxiv.org/abs/2511.08579).
+- Lyra (2026). neuron-explorer: steering-first neuron labelling. [github.com/lyramakesmusic/neuron-explorer](https://github.com/lyramakesmusic/neuron-explorer).
+- McInnes, L., Healy, J., Melville, J. (2018). UMAP: Uniform Manifold Approximation and Projection for Dimension Reduction. [arXiv:1802.03426](https://arxiv.org/abs/1802.03426).
+- Merity, S., Xiong, C., Bradbury, J., et al. (2016). Pointer Sentinel Mixture Models (WikiText). [arXiv:1609.07843](https://arxiv.org/abs/1609.07843).
+- nostalgebraist (2020). Interpreting GPT: the logit lens. [LessWrong](https://www.lesswrong.com/posts/AcKRB8wDpdaN6v6ru/interpreting-gpt-the-logit-lens).
+- Reflection (2026). Beam-1.0-501B-A23B. [Hugging Face model card](https://huggingface.co/reflection/Beam-1.0-501B-A23B).
+- Sheng, L., Zhang, A., Wu, Z., et al. (2025). On Reasoning Strength Planning in Large Reasoning Models. [arXiv:2506.08390](https://arxiv.org/abs/2506.08390).
+- Wang, Y., Ma, X., Zhang, G., et al. (2024). MMLU-Pro: A More Robust and Challenging Multi-Task Language Understanding Benchmark. [arXiv:2406.01574](https://arxiv.org/abs/2406.01574).
+
+## Cite
+
+```bibtex
+@misc{dutta2026insidebeam,
+  title        = {Inside Beam: steering, labelling and banning the experts of Beam-1.0-501B},
+  author       = {Dutta, Swapnil},
+  year         = {2026},
+  howpublished = {\url{https://huggingface.co/spaces/rycerzes/inside-beam}},
+  note         = {Code: https://github.com/rycerzes/beam-inside; data: https://huggingface.co/datasets/rycerzes/beam-expert-atlas}
+}
+```
 
 Code is Apache-2.0. `meta/config.json` and `meta/chat_template.jinja` are Reflection's, from the Beam model repo
 (Apache-2.0).
