@@ -285,7 +285,8 @@ summary = {
                                         "median_think": float(np.median(e2_think[a]))} for a, v in e2_acc.items()}},
 }
 (args.out / "summary.json").write_text(json.dumps(summary, indent=1))
-print("summary.json written")
+(args.out / "README.md").write_text((pathlib.Path(__file__).parent / "atlas_card.md").read_text())
+print("summary.json and README.md written")
 
 # ---- explorer ----------------------------------------------------------------------------------------------------
 if not args.no_explorer:

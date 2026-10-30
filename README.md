@@ -30,6 +30,7 @@ subject where it was.
 - **Explorer:** this Space (search any expert, read Beam's label for it and what Beam says when it is pushed)
 - **Data:** [rycerzes/beam-expert-atlas](https://huggingface.co/datasets/rycerzes/beam-expert-atlas)
 - **Write-up:** [rycerz.es/blog/inside-beam](https://rycerz.es/blog/inside-beam)
+- **Research log:** [research_log.md](research_log.md), dated entries including what failed and what we corrected
 - **Code:** this repo, mirrored at [github.com/rycerzes/beam-inside](https://github.com/rycerzes/beam-inside); the
   vLLM plugin is [`steer/`](steer/)
 
