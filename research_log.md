@@ -370,8 +370,7 @@ reading of the same depth curve the judge gave.
 **REAP by Beam's subject (coherent poles; 18 subjects, Bonferroni 0.0028).** Pruned more: chemistry 21.6% kept
 (n = 37), biology 34.3%, health 35.2%, math 43.0% (all p ≤ 0.0008). Kept more: psychology 67% (p = 0.001), general
 53.5%. **Correction:** the lexicon's "code kept" was syntax: format/syntax experts 53.6%, code concepts 50.9% (ns).
-(Found on 10-30: this test counted each − pole's duplicate label as a second observation, so these p-values are
-optimistic; not yet rerun on + poles.)
+(Rerun on 10-30 with + pole labels only: essentially unchanged; see the 10-30 correction.)
 Against peterhdd's per-subject MMLU-Pro drops: Spearman −0.20 over 13 subjects, the expected sign and underpowered
 (30 questions per subject, a drop's SE ~0.11). Output-side labels are not routing behaviour, and n = 30 cannot settle
 it; the proper test is causal: ban the experts and score the full benchmark.
@@ -443,9 +442,15 @@ poles: L8–15 27% / 33%, L16–23 42% / 28%, L24–31 75% / 53%, L32–39 73% /
 about half of the $38 labelling spend.
 
 **What is unaffected.** Steering significance (behavioural; the theme metric never reads labels), the effort results,
-and the MMLU-Pro bans (whole experts banned; a − pole's label still describes the expert's + direction). **What is
-weakened.** The REAP-by-Beam-subject cross-check counted the duplicate labels twice, so its p-values are optimistic
-and it has not been rerun. The random-pole rate rising to ~49% on + poles also means the gap over random poles
+and the MMLU-Pro bans: they remove whole experts, and a − pole's label is a second labelling of the same expert's +
+tokens. The ban lists took an expert if either labelling named the subject; 25 of the 143 law experts, 18 of 165
+health and 54 of 588 math came in only through the second one. **Reruns on + poles (free, `--plus-only`).**
+Self-label scoring reproduces the corrected judge numbers (70.0% vs 48.8% with tokens, 71.4% vs 49.2% with Beam's
+labels; Beam-only right 121 vs token-only 98, p = 0.14), and on the judge set coherent poles are significant 74% vs
+40% (p = 3e-43). The REAP test counts an expert once per subject, so the duplicates had not double-counted; with +
+labels only: chemistry kept 23.5% (n = 34, p = 0.003, now just above the Bonferroni line), biology 33.3%
+(p = 0.0002), health 35.4% (p = 0.0004), math 43.8% (p = 0.002), psychology 70.8% (p = 0.0006). The conclusions
+stand. The random-pole rate rising to ~49% on + poles also means the gap over random poles
 (~21 points) is smaller in relative terms than the pooled numbers suggested. Lesson: a label column that is the same
 on both rows of a two-row unit should have been caught by a one-line uniqueness check before any judge spend.
 
@@ -462,8 +467,7 @@ on both rows of a two-row unit should have been caught by a one-line uniqueness 
 - **The real pruned model.** We emulated REAP on the NVFP4 model; running the REAP checkpoint would check the emulation.
 - **Effort.** The swap is specific but weak (1.2× vs the dial's 2.55×). Untested: the direction at the think start
   with a dose calibrated to the cliff, and why low effort is fragile (what the trained low-effort state depends on).
-- **The − poles were never labelled.** ~11k − poles need their own Beam labels and judge items (not yet quoted), and
-  the REAP-by-subject test needs a rerun on + poles only.
+- **The − poles were never labelled.** ~11k − poles need their own Beam labels and judge items (~$19 + ~$0.15).
 - **The 3 lost waves** (478 experts) and the dense neurons, which got 48 units and a broken lens.
 - **Never started:** the false-submit probe on the 65 TB4 trajectories; the held-back-expert reading of the router
   bias; co-firing structure among experts. None of this was pre-registered, unlike the TB4 study.

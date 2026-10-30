@@ -104,7 +104,9 @@ Bans set the expert's routing correction bias to −1000 for the whole batch, wh
 exactly without changing the remaining experts' weights. Scoring is without thinking: the next-token log-probability
 of each answer letter after the prompt, normalised over the allowed letters. `question_id` is the `question_id` of
 [TIGER-Lab/MMLU-Pro](https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro) (test split). Arms: `base`; `law`, `health`,
-`math` (experts with a coherent Beam label of that subject) with count- and load-matched `*_ctrl`; `reap` (the 128
+`math` (experts with a coherent Beam label of that subject: 143, 165, 588) with count- and load-matched `*_ctrl`.
+Beam labelled each direction's + tokens twice (the second time as its − pole, see above), and an expert is in an arm
+if either label named the subject: 25, 18 and 54 of them only through the second label; `reap` (the 128
 experts per layer that [mrfakename/Beam-1.0-REAP-255B-A23B](https://huggingface.co/mrfakename/Beam-1.0-REAP-255B-A23B)
 removed).
 
