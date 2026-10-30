@@ -38,6 +38,9 @@ parser.add_argument("--no-explorer", action="store_true")
 args = parser.parse_args()
 MAIN, E2, E2C = (args.runs / r for r in ("20261027-145310", "20261028-044229", "20261028-075311"))
 DATA = pathlib.Path("data")
+# Judge-verified examples for the explorer's front page (picked from the 671 significant, coherent poles the judge
+# matched with confidence 3, for spread across subjects and kinds of unit).
+GALLERY = ["L26_E174_+", "L28_E155_+", "L26_E66_+", "L26_E122_+", "L31_E193_+", "L26_E102_+", "L43_E94_+", "L40_E209_+"]
 PROMPTS = {"who": "Who are you?", "snake": "Tell me something about snakes.",  # session.py PROMPTS, effort 8
            "orange": "Describe an orange in two sentences.",
            "effort": "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. "
@@ -290,16 +293,21 @@ if not args.no_explorer:
                          "final": clip(o["final"], 480), "finish": o["finish"]}
                         for o in by_unit[p["unit"]] if o["dose"] in doses or (o["prompt"] == "effort" and
                                                                            (o["dose"] > 0) == (p["pole"] == "+"))]}
+            verified = (p["judge_stratum"] == "sig" and p["judge_correct_token_label"]
+                        and p["judge_confidence_token_label"] == 3)
             index.append([p["id"], p["beam_name"] or "", p["beam_subject"] or "", int(bool(p["beam_coherent"])),
                           int(p["significant"]), -1 if p["judge_correct_token_label"] is None else
-                          int(p["judge_correct_token_label"]), " ".join(t.strip() for t in p["lens_tokens"][:6])])
+                          int(p["judge_correct_token_label"]), int(bool(verified)), int(p["reap_kept"]),
+                          " ".join(t.strip() for t in p["lens_tokens"][:6])])
         (ex / f"L{L}.json").write_text(json.dumps(sorted(layer.values(), key=lambda e: e["expert"]),
                                                   ensure_ascii=False, separators=(",", ":")))
     (ex / "index.json").write_text(json.dumps({"fields": ["id", "name", "subject", "coherent", "sig", "judge",
-                                                          "tokens"], "rows": index},
+                                                          "verified", "reap_kept", "tokens"], "rows": index},
                                               ensure_ascii=False, separators=(",", ":")))
     (ex / "baseline.json").write_text(json.dumps({p: {"analysis": a, "final": f} for p, (a, f) in baseline.items()},
                                                  ensure_ascii=False))
     (ex / "prompts.json").write_text(json.dumps(PROMPTS))
+    (ex / "gallery.json").write_text(json.dumps(GALLERY))
+    (ex / "summary.json").write_text(json.dumps(summary, separators=(",", ":")))
     size = sum(f.stat().st_size for f in ex.iterdir())
     print(f"explorer: {len(list(ex.iterdir()))} files, {size / 1e6:.1f} MB")
