@@ -13,7 +13,6 @@ Inputs, all under data/ (gitignored; the private run repo and this session's scr
   judge/                 blind three-way test: key, DeepSeek verdicts with token labels
   selflabel/             Beam's pole labels and DeepSeek's verdicts with those labels
   mmlu/                  ban arms and the MMLU-Pro run
-  reap/                  REAP-255B's kept experts (reap_saliency.json from the REAP repo)
 
 Writes OUT_DIR as a dataset repo: one Parquet file per table (configs in README.md), summary.json with the headline
 numbers, and explorer/ (per-layer JSON the Space loads). Steered text is kept whole in Parquet; token ids are dropped
@@ -116,9 +115,9 @@ for k, v in sorted(zip(key.values(), verdicts), key=lambda kv: kv[0]["stratum"] 
     i = pid(k["layer"], k["expert"], k["pole"])
     judge_tok[i], judge_beam[i] = v, beam_verdicts.get(k["id"])
 labels = {r["id"]: r for r in jsonl(DATA / "selflabel/labels.jsonl")}
-reap_layers = json.loads((DATA / "reap/reap_saliency.json").read_text())["layers"]
-reap_kept = {(int(L), e) for L, v in reap_layers.items() if v.get("type") == "sparse" for e in v["kept"]}
-arms = json.loads((DATA / "mmlu/arms.json").read_text())["arms"]
+# The study's pruning-emulation arm is left out of the public tables: only the subject bans, their controls and base.
+SKIP_ARMS = {"reap"}
+arms = [a for a in json.loads((DATA / "mmlu/arms.json").read_text())["arms"] if a["name"] not in SKIP_ARMS]
 banned_in = collections.defaultdict(list)
 for arm in arms:
     for L, e in arm["bans"]:
@@ -161,7 +160,7 @@ for r in ranked:
         "judge_confidence_token_label": None if jt is None else jt["confidence"],
         "judge_correct_beam_label": None if jb is None else jb["correct"],
         "judge_confidence_beam_label": None if jb is None else jb["confidence"],
-        "reap_kept": (r["layer"], r["expert"]) in reap_kept, "banned_in": banned_in.get((r["layer"], r["expert"]), []),
+        "banned_in": banned_in.get((r["layer"], r["expert"]), []),
         "effort_rd_think_start": effort_rd.get((r["layer"], r["expert"])),
     })
 poles.sort(key=lambda p: (p["layer"], p["expert"], p["pole"]))
@@ -183,6 +182,8 @@ mmlu_run = DATA / "mmlu/runs/20261029-113719"
 mmlu = []
 for path in sorted(mmlu_run.glob("mmlu_*.jsonl.gz")):
     arm = path.name[len("mmlu_"):-len(".jsonl.gz")]
+    if arm in SKIP_ARMS:
+        continue
     for r in jsonl(path):
         mmlu.append({"arm": arm, "question_id": r["id"], "category": r["category"], "answer": r["answer"],
                      "pred": r["pred"], "correct": r["pred"] == r["answer"], "letter_logprobs": r["lp"]})
@@ -278,7 +279,7 @@ summary = {
                    "sig_if_coherent": rate([p["significant"] for p in testable if p["beam_coherent"] is True]),
                    "sig_if_incoherent": rate([p["significant"] for p in testable if p["beam_coherent"] is False])},
     "depth": depth,
-    "bans": score["bans"], "reap": score["reap"],
+    "bans": score["bans"],
     "effort": {"readout_r2": {k: v["r2"] for k, v in analysis["readout"].items()},
                "off_dial": analysis["off_dial"],
                "competition_math": {a: {"n": len(v), "acc": round(float(np.mean(v)), 3),
@@ -300,7 +301,7 @@ if not args.no_explorer:
     for L in MOE:
         layer = {}
         for p in (p for p in poles if p["layer"] == L):
-            e = layer.setdefault(p["expert"], {"expert": p["expert"], "reap_kept": p["reap_kept"],
+            e = layer.setdefault(p["expert"], {"expert": p["expert"],
                                                "banned_in": p["banned_in"], "effort_rd": p["effort_rd_think_start"],
                                                "poles": {}})
             doses = (0.4, 1.0) if p["pole"] == "+" else (-1.0,)
@@ -319,12 +320,12 @@ if not args.no_explorer:
                         and p["judge_confidence_token_label"] == 3)
             index.append([p["id"], p["beam_name"] or "", p["beam_subject"] or "", int(bool(p["beam_coherent"])),
                           int(p["significant"]), -1 if p["judge_correct_token_label"] is None else
-                          int(p["judge_correct_token_label"]), int(bool(verified)), int(p["reap_kept"]),
+                          int(p["judge_correct_token_label"]), int(bool(verified)),
                           " ".join(t.strip() for t in p["lens_tokens"][:6])])
         (ex / f"L{L}.json").write_text(json.dumps(sorted(layer.values(), key=lambda e: e["expert"]),
                                                   ensure_ascii=False, separators=(",", ":")))
     (ex / "index.json").write_text(json.dumps({"fields": ["id", "name", "subject", "coherent", "sig", "judge",
-                                                          "verified", "reap_kept", "tokens"], "rows": index},
+                                                          "verified", "tokens"], "rows": index},
                                               ensure_ascii=False, separators=(",", ":")))
     (ex / "baseline.json").write_text(json.dumps({p: {"analysis": a, "final": f} for p, (a, f) in baseline.items()},
                                                  ensure_ascii=False))

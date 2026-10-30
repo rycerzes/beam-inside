@@ -47,7 +47,7 @@ configs:
 Every routed expert of [reflection/Beam-1.0-501B-A23B](https://huggingface.co/reflection/Beam-1.0-501B-A23B)
 (49 MoE layers × 256 experts), pushed inside the running model and checked against random controls, labelled by
 Beam itself, plus expert-ban experiments on MMLU-Pro and Beam's internal activations across reasoning-effort
-settings. Browse it in the [Inside Beam explorer](https://huggingface.co/spaces/rycerzes/beam-inside); code and
+settings. Browse it in the [Inside Beam explorer](https://huggingface.co/spaces/rycerzes/inside-beam); code and
 method in [rycerzes/beam-inside](https://github.com/rycerzes/beam-inside).
 
 All runs used the NVFP4 release in vLLM (tensor parallel 4, Marlin MoE kernels) with the `beam-steer` plugin,
@@ -70,7 +70,7 @@ greedy decoding, prefix caching off.
 
 | Config | Rows | What |
 |---|---|---|
-| `poles` | 24,132 | one row per expert pole: tokens, Beam's label, steering statistics, judge verdict, REAP kept, ban arms |
+| `poles` | 24,132 | one row per expert pole: tokens, Beam's label, steering statistics, judge verdict, ban arms |
 | `steering_outputs` | 142,120 | every steered generation: unit × prompt (who / snake / orange / effort) × dose, thinking and answer |
 | `steering_units` | 13,424 | unit definitions, including dense neurons and controls |
 | `steering_baseline` | 4 | unsteered answers to the four prompts |
@@ -104,11 +104,12 @@ Bans set the expert's routing correction bias to −1000 for the whole batch, wh
 exactly without changing the remaining experts' weights. Scoring is without thinking: the next-token log-probability
 of each answer letter after the prompt, normalised over the allowed letters. `question_id` is the `question_id` of
 [TIGER-Lab/MMLU-Pro](https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro) (test split). Arms: `base`; `law`, `health`,
-`math` (experts with a coherent Beam label of that subject: 143, 165, 588) with count- and load-matched `*_ctrl`.
+`math` (experts with a coherent Beam label of that subject: 143, 165, 588) with `*_ctrl` arms that ban the same
+number of experts per layer, none labelled with a tested subject, each matched to a banned expert on routing load.
 Beam labelled each direction's + tokens twice (the second time as its − pole, see above), and an expert is in an arm
-if either label named the subject: 25, 18 and 54 of them only through the second label; `reap` (the 128
-experts per layer that [mrfakename/Beam-1.0-REAP-255B-A23B](https://huggingface.co/mrfakename/Beam-1.0-REAP-255B-A23B)
-removed).
+if either label named the subject: 25, 18 and 54 of them only through the second label. Routing load is the
+per-expert routing count in the REAP calibration file (`reap_saliency.json`, field `count`, from
+[mrfakename/Beam-1.0-REAP-255B-A23B](https://huggingface.co/mrfakename/Beam-1.0-REAP-255B-A23B), Apache-2.0).
 
 ### Effort
 
@@ -156,5 +157,5 @@ Released under Apache-2.0, like Beam. Generations are Beam's (Apache-2.0). Quest
 (MIT), GSM8K (MIT), [HuggingFaceH4/aime_2024](https://huggingface.co/datasets/HuggingFaceH4/aime_2024),
 [MathArena/aime_2025](https://huggingface.co/datasets/MathArena/aime_2025) (CC BY-NC-SA 4.0) and
 [math-ai/amc23](https://huggingface.co/datasets/math-ai/amc23); no question text is copied, though Beam's outputs may
-restate a problem. WikiText-103 (CC BY-SA) was used only for the residual-norm statistics. REAP kept lists from
-mrfakename/Beam-1.0-REAP-255B-A23B (Apache-2.0).
+restate a problem. WikiText-103 (CC BY-SA) was used only for the residual-norm statistics. Routing counts for the ban controls come
+from the REAP calibration file in mrfakename/Beam-1.0-REAP-255B-A23B (Apache-2.0).

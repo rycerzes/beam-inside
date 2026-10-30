@@ -1,25 +1,3 @@
----
-title: Inside Beam
-emoji: 🔦
-colorFrom: indigo
-colorTo: gray
-sdk: static
-app_file: explorer/index.html
-pinned: false
-license: apache-2.0
-short_description: Beam names its experts; banning them removes that knowledge
-models:
-  - reflection/Beam-1.0-501B-A23B
-  - reflection/Beam-1.0-501B-A23B-NVFP4
-datasets:
-  - rycerzes/beam-expert-atlas
-tags:
-  - interpretability
-  - mixture-of-experts
-  - steering
-  - vllm
----
-
 # Inside Beam
 
 A map of all 12,544 routed experts in [Beam-1.0-501B-A23B](https://huggingface.co/reflection/Beam-1.0-501B-A23B),
@@ -27,12 +5,12 @@ built by pushing each one inside the running model and checking what changes aga
 by Beam itself. Banning the experts Beam labelled *law* drops MMLU-Pro law by 13 points and leaves every other
 subject where it was.
 
-- **Explorer:** this Space (search any expert, read Beam's label for it and what Beam says when it is pushed)
+- **Explorer:** [huggingface.co/spaces/rycerzes/inside-beam](https://huggingface.co/spaces/rycerzes/inside-beam)
+  (search any expert, read Beam's label for it and what Beam says when it is pushed)
 - **Data:** [rycerzes/beam-expert-atlas](https://huggingface.co/datasets/rycerzes/beam-expert-atlas)
 - **Write-up:** [rycerz.es/blog/inside-beam](https://rycerz.es/blog/inside-beam)
 - **Research log:** [research_log.md](research_log.md), dated entries including what failed and what we corrected
-- **Code:** this repo, mirrored at [github.com/rycerzes/beam-inside](https://github.com/rycerzes/beam-inside); the
-  vLLM plugin is [`steer/`](steer/)
+- **Code:** this repo; the vLLM plugin is [`steer/`](steer/)
 
 Built for Reflection's [Build with Beam](https://huggingface.co/reflection/Beam-1.0-501B-A23B/discussions/5) contest.
 
@@ -73,11 +51,6 @@ of the same norm (p = 5e-8). Low effort is fragile: re-routing 37 "effort expert
 banned) or 37 random experts both lift effort-8 accuracy from 80% to 91–94%, the same as raising the dial to 32, so
 that gain is not effort-specific.
 
-**5. REAP pruning, emulated.** Banning the 128 experts per layer that the community
-[REAP-255B](https://huggingface.co/mrfakename/Beam-1.0-REAP-255B-A23B) prune removed costs 15 points overall: health
-−32, history −23, philosophy −21, law −20, engineering only −5. This measures what a pruning plan costs on the full
-model before anyone builds the pruned checkpoint.
-
 ## How Beam was used
 
 - **As the subject.** Every intervention runs inside the real 501B model: the NVFP4 release in vLLM on 4x RTX PRO
@@ -96,7 +69,7 @@ model before anyone builds the pruned checkpoint.
 - **A pruning check.** Ban any set of experts and score it on MMLU-Pro in about 6 minutes per arm on 4 GPUs, before
   building a pruned checkpoint. Arms are lists of `[layer, expert]` ([`scripts/mmlu_arms.py`](scripts/mmlu_arms.py)).
 - **The atlas.** Per expert direction: top tokens, Beam's label and subject, steering significance, judge verdict,
-  whether REAP kept it, and Beam's steered outputs ([dataset](https://huggingface.co/datasets/rycerzes/beam-expert-atlas)).
+  and Beam's steered outputs ([dataset](https://huggingface.co/datasets/rycerzes/beam-expert-atlas)).
 - **Effort activations.** Residuals at every layer and router logits for 200 GSM8K questions at 9 effort settings
   (5 positions each), so effort probes can be trained without running Beam.
 
@@ -146,7 +119,7 @@ llm.collective_rpc("beam_steer_reset_bias")
 
 Why bias bans, not logit bans: Beam picks experts by `sigmoid(logit) + e_score_correction_bias`, and that bias is
 18–28 with a spread of at most 0.02 within a layer, so a −30 logit does not guarantee a ban. The bias only enters the
-choice, never the routing weights, which is what slicing an expert out of the router (as REAP does) amounts to.
+choice, never the routing weights, which is what slicing an expert out of the router amounts to.
 
 **Test.** [`scripts/vllm_tiny_check.py`](scripts/vllm_tiny_check.py) builds a tiny random Beam from the real
 `config.json` in the Hub's FP8, BF16 and NVFP4 formats, runs it through transformers and through vLLM with the plugin,
@@ -173,7 +146,7 @@ Everything ran from this repo on HF Jobs; [`scripts/watch_job.py`](scripts/watch
 | Effort analysis and competition-math arms | `effort_analysis.py`, `effort2_inputs.py`, session phase `effort2` | 4x RTX PRO 6000, 2.5 h incl. a cancelled first attempt | $28.05 |
 | Blind three-way judge (DeepSeek-V4-Flash) | `judge_items.py` → `judge_router.py` → `judge_score.py` | HF Inference Providers | $0.88 |
 | Beam labels its experts | `pole_rows.py` → `self_label.py` → `self_label_score.py` | HF Inference Providers (Baseten) | $38.07 |
-| REAP cross-check, ban arms, MMLU-Pro | `reap_crosscheck.py`, `mmlu_arms.py`, session phase `mmlu`, `mmlu_score.py` | 4x RTX PRO 6000, 1 h | $10.87 |
+| Ban arms, MMLU-Pro | `mmlu_arms.py`, session phase `mmlu`, `mmlu_score.py` | 4x RTX PRO 6000, 1 h | $10.87 |
 | Public dataset and explorer files | `uv run scripts/export_atlas.py OUT` and `export_captures.py` | CPU | — |
 
 Total spend about $120: ~$81 of GPU time (including an earlier pilot sweep, rehearsals and one cancelled run), $38
@@ -196,7 +169,7 @@ a global index configured.
 | `effort_analysis.py`, `effort2_inputs.py` | effort readout, off-dial reads, effort experts; competition-math arm inputs |
 | `judge_items.py`, `judge_router.py`, `judge_score.py`, `label_items.py` | blind three-way label test |
 | `pole_rows.py`, `self_label.py`, `self_label_score.py` | Beam labels its own expert directions; scoring |
-| `reap_crosscheck.py`, `mmlu_arms.py`, `mmlu_score.py` | REAP kept-expert analysis, ban arms, paired MMLU-Pro scoring |
+| `mmlu_arms.py`, `mmlu_score.py` | ban arms with load-matched controls, paired MMLU-Pro scoring |
 | `export_atlas.py`, `export_captures.py` | public dataset tables, explorer JSON, activation captures |
 
 </details>
@@ -215,15 +188,15 @@ a global index configured.
   pass also labelled and judged − pushes, but with the + side's tokens; those results are excluded (they sit at
   chance, as a mismatched label should), and about half of the labelling spend went to them.
 - MMLU-Pro is scored without thinking, so absolute accuracy (62.3%) is below Beam's reported score with thinking.
-- The REAP emulation bans REAP's pruned experts in the NVFP4 model; we did not run the REAP checkpoint itself.
 - None of this was pre-registered.
 
 ## Credits
 
 Method: Lyra's [neuron-explorer](https://github.com/lyramakesmusic/neuron-explorer) (steering-first labelling with
-random controls), SteerMoE, and Li et al. (arXiv 2511.08579) on self-explanation. REAP kept-expert lists from
-[mrfakename/Beam-1.0-REAP-255B-A23B](https://huggingface.co/mrfakename/Beam-1.0-REAP-255B-A23B); per-subject REAP
-numbers from peterhdd's thread entry. Static weight analysis of Beam:
+random controls), SteerMoE, and Li et al. (arXiv 2511.08579) on self-explanation. The ban controls are matched on
+per-expert routing counts from the REAP calibration file (`reap_saliency.json` in
+[mrfakename/Beam-1.0-REAP-255B-A23B](https://huggingface.co/mrfakename/Beam-1.0-REAP-255B-A23B), Apache-2.0). Static
+weight analysis of Beam:
 [Barneyjm/beam-teardown](https://github.com/Barneyjm/beam-teardown).
 
 Code is Apache-2.0. `meta/config.json` and `meta/chat_template.jinja` are Reflection's, from the Beam model repo
