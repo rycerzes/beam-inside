@@ -192,12 +192,48 @@ a global index configured.
 
 ## Credits
 
-Method: Lyra's [neuron-explorer](https://github.com/lyramakesmusic/neuron-explorer) (steering-first labelling with
-random controls), SteerMoE, and Li et al. (arXiv 2511.08579) on self-explanation. The ban controls are matched on
-per-expert routing counts from the REAP calibration file (`reap_saliency.json` in
-[mrfakename/Beam-1.0-REAP-255B-A23B](https://huggingface.co/mrfakename/Beam-1.0-REAP-255B-A23B), Apache-2.0). Static
-weight analysis of Beam:
-[Barneyjm/beam-teardown](https://github.com/Barneyjm/beam-teardown).
+**Where this started.** [Simon V's post](https://x.com/Simon_Vt/status/2114444548500005044) quoting
+[@_lyraaaa_](https://x.com/_lyraaaa_)'s two-neuron "evil Qwen" steering recipe, and Goodfire's essay
+[Neural Networks Are Already Clean](https://already-clean.goodfire.com/), which argues most units have one readable job
+and that you check a label by steering it.
+
+**Method.**
+- Lyra's [neuron-explorer](https://github.com/lyramakesmusic/neuron-explorer): steering-first labelling with random
+  controls, doses in units of the median residual norm, the who / snake / orange prompts, and the research-log format.
+- [RhizoNymph/vllm](https://github.com/RhizoNymph/vllm), the steering fork of vLLM that neuron-explorer runs on: our
+  beam-steer plugin's per-request steering table follows its design (the fork has no Beam support, so we wrote our own).
+- Expert steering and bans: SteerMoE ([arXiv 2509.09660](https://arxiv.org/abs/2509.09660)) and MoTE
+  ([arXiv 2502.11096](https://arxiv.org/abs/2502.11096)).
+- The blind three-way label test: Gur-Arieh et al. ([arXiv 2501.08319](https://arxiv.org/abs/2501.08319)). A model
+  describing its own units: Li et al. ([arXiv 2511.08579](https://arxiv.org/abs/2511.08579)). Reasoning strength read
+  from activations: Sheng et al. ([arXiv 2506.08390](https://arxiv.org/abs/2506.08390)). Expert-level MoE
+  interpretability: Herbst et al. ([arXiv 2604.02178](https://arxiv.org/abs/2604.02178)). The logit lens:
+  [nostalgebraist (2020)](https://www.lesswrong.com/posts/AcKRB8wDpdaN6v6ru/interpreting-gpt-the-logit-lens).
+- Static weight analysis of Beam: [Barneyjm/beam-teardown](https://github.com/Barneyjm/beam-teardown).
+
+**Model, serving and compute.** Reflection's [Beam-1.0-501B-A23B](https://huggingface.co/reflection/Beam-1.0-501B-A23B)
+and its [NVFP4 release](https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4) (Apache-2.0), served with
+[vLLM](https://github.com/vllm-project/vllm) following its [Beam recipe](https://recipes.vllm.ai/reflection/Beam-1.0-501B-A23B);
+transformers' Beam implementation for the reference checks; HF Jobs for the GPU runs; HF Inference Providers for
+Beam's labels (Baseten) and the judge, DeepSeek-V4-Flash (DeepInfra). Pilot judges: Claude Sonnet 5.5 and
+Qwen3.8-Flash-Next.
+
+**Data.** [MMLU-Pro](https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro), [GSM8K](https://huggingface.co/datasets/openai/gsm8k),
+[AIME 2024](https://huggingface.co/datasets/HuggingFaceH4/aime_2024), [AIME 2025](https://huggingface.co/datasets/MathArena/aime_2025),
+[AMC 2023](https://huggingface.co/datasets/math-ai/amc23), [WikiText-103](https://huggingface.co/datasets/Salesforce/wikitext)
+(statistics only). The ban controls are matched on per-expert routing counts from the REAP calibration file
+(`reap_saliency.json` in [mrfakename/Beam-1.0-REAP-255B-A23B](https://huggingface.co/mrfakename/Beam-1.0-REAP-255B-A23B),
+Apache-2.0).
+
+**The site.** Built on Thibaud Frere's [research article template](https://huggingface.co/spaces/tfrere/research-article-template)
+(CC BY 4.0). Its look and interactions borrow from [Neuron Studio](https://huggingface.co/spaces/webml-community/neuron-studio),
+[Neuronary](https://neuronary.org/), [Neuron Personas](https://neuronpersonas.com/),
+[Neuronpedia](https://www.neuronpedia.org/)'s feature maps, Polo Club's
+[Transformer Explainer](https://github.com/poloclub/transformer-explainer) and Martin Alderson's MoE routing
+visualiser. Charts with [D3](https://d3js.org/); the map layout with [UMAP](https://github.com/lmcinnes/umap).
+
+**The contest.** Reflection and Hugging Face's [Build with Beam](https://huggingface.co/reflection/Beam-1.0-501B-A23B/discussions/5)
+([announcement](https://huggingface.co/blog/reflection-beam)). Not affiliated with Reflection.
 
 Code is Apache-2.0. `meta/config.json` and `meta/chat_template.jinja` are Reflection's, from the Beam model repo
 (Apache-2.0).
