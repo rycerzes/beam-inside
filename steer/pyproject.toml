@@ -3,6 +3,7 @@ name = "beam-steer"
 version = "0.1.0"
 description = "Per-request residual steering and residual-norm stats for vLLM's Beam model"
 requires-python = ">=3.10"
+license = "Apache-2.0"
 
 [project.entry-points."vllm.general_plugins"]
 beam_steer = "beam_steer:register"

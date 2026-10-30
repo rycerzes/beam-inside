@@ -1,4 +1,6 @@
 data/
 ref/
-meta/*.json
+meta/model.safetensors.index.json
+meta/tokenizer.json
 __pycache__/
+.ruff_cache/
