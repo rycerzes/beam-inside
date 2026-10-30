@@ -295,7 +295,7 @@ function poleView(p, sign) {
   const verdict = p.judge === null ? null : el("span", { class: `chip ${p.judge ? "ok" : "bad"}` }, p.judge ? "judge matched" : "judge missed");
   const sigChip = p.null === "untestable" ? el("span", { class: "chip" }, "no fair control")
     : el("span", { class: `chip ${p.sig ? "ok" : ""}` }, p.sig ? "significant" : "not significant");
-  const prompts = [...new Set(p.out.map((o) => o.prompt))];
+  const prompts = ["who", "snake", "orange", "effort"].filter((pr) => p.out.some((o) => o.prompt === pr));
   const view = el("div");
   const tabs = el("div", { class: "tabs", role: "tablist" });
   const show = (prompt) => {
