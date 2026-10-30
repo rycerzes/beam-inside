@@ -52,7 +52,7 @@ Beam itself, plus expert-ban experiments on MMLU-Pro and Beam's internal activat
 settings. Browse it in the [Inside Beam explorer](https://huggingface.co/spaces/rycerzes/inside-beam); code and
 method in [rycerzes/beam-inside](https://github.com/rycerzes/beam-inside).
 
-All runs used the NVFP4 release in vLLM (tensor parallel 4, Marlin MoE kernels) with the `beam-steer` plugin,
+All runs used [reflection/Beam-1.0-501B-A23B-NVFP4](https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4), Reflection's NVFP4 release, in vLLM (tensor parallel 4, Marlin MoE kernels) with the `beam-steer` plugin,
 greedy decoding, prefix caching off.
 
 ## Terms
@@ -167,12 +167,14 @@ with safe_open(hf_hub_download(repo, "captures/gsm8k_effort_00.safetensors", rep
 
 ## Licence and sources
 
-Released under Apache-2.0, like Beam. Generations are Beam's (Apache-2.0). Question references point at MMLU-Pro
+Released under Apache-2.0, like Beam. Generations come from [Beam-1.0-501B-A23B-NVFP4](https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4) (Apache-2.0). Question references point at MMLU-Pro
 (MIT), GSM8K (MIT), [HuggingFaceH4/aime_2024](https://huggingface.co/datasets/HuggingFaceH4/aime_2024),
 [MathArena/aime_2025](https://huggingface.co/datasets/MathArena/aime_2025) (CC BY-NC-SA 4.0) and
 [math-ai/amc23](https://huggingface.co/datasets/math-ai/amc23); no question text is copied, though Beam's outputs may
 restate a problem. WikiText-103 (CC BY-SA) was used only for the residual-norm statistics. Routing counts for the ban controls come
 from the REAP calibration file in mrfakename/Beam-1.0-REAP-255B-A23B (Apache-2.0).
+
+Built with the help of [Claude Code](https://www.anthropic.com/claude-code) (Claude Opus 5.5).
 
 ## Citation
 

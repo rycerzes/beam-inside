@@ -10,7 +10,7 @@ subject where it was.
 - **Explorer:** [huggingface.co/spaces/rycerzes/inside-beam](https://huggingface.co/spaces/rycerzes/inside-beam)
   (search any expert, read Beam's label for it and what Beam says when it is pushed)
 - **Data:** [rycerzes/beam-expert-atlas](https://huggingface.co/datasets/rycerzes/beam-expert-atlas)
-- **Write-up:** coming soon on [rycerz.es](https://rycerz.es); until then, the research log below
+- **Write-up:** [rycerz.es/blog/inside-beam](https://rycerz.es/blog/inside-beam)
 - **Research log:** [research_log.md](research_log.md), dated entries including what failed and what we corrected
 - **Code:** this repo; the vLLM plugin is [`steer/`](steer/)
 
@@ -60,7 +60,7 @@ that gain is not effort-specific.
 
 ## How Beam was used
 
-- **As the subject.** Every intervention runs inside the real 501B model: the NVFP4 release in vLLM on 4x RTX PRO
+- **As the subject.** Every intervention runs inside [Beam-1.0-501B-A23B-NVFP4](https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4), Reflection's NVFP4 release, in vLLM on 4x RTX PRO
   6000 (HF Jobs), with our plugin adding per-request residual pushes, router-logit changes, exact expert bans and
   activation capture. About 7 hours on 4 GPUs in total.
 - **As the labeller.** Beam named 10,926 of its own expert directions (name, description, subject, coherent or not)
@@ -239,6 +239,8 @@ Apache-2.0).
 [Neuronary](https://neuronary.org/), the map follows [Neuronpedia](https://www.neuronpedia.org/)'s feature maps, and the
 route view follows the data-flow overview of Polo Club's [Transformer Explainer](https://github.com/poloclub/transformer-explainer). Charts with [D3](https://d3js.org/); the map layout with [UMAP](https://github.com/lmcinnes/umap).
 
+**Tooling.** Built with the help of [Claude Code](https://www.anthropic.com/claude-code) (Claude Opus 5.5).
+
 **The contest.** Reflection and Hugging Face's [Build with Beam](https://huggingface.co/reflection/Beam-1.0-501B-A23B/discussions/5)
 ([announcement](https://huggingface.co/blog/reflection-beam)). Not affiliated with Reflection.
 
@@ -259,6 +261,7 @@ route view follows the data-flow overview of Polo Club's [Transformer Explainer]
 - Merity, S., Xiong, C., Bradbury, J., et al. (2016). Pointer Sentinel Mixture Models (WikiText). [arXiv:1609.07843](https://arxiv.org/abs/1609.07843).
 - nostalgebraist (2020). Interpreting GPT: the logit lens. [LessWrong](https://www.lesswrong.com/posts/AcKRB8wDpdaN6v6ru/interpreting-gpt-the-logit-lens).
 - Reflection (2026). Beam-1.0-501B-A23B. [Hugging Face model card](https://huggingface.co/reflection/Beam-1.0-501B-A23B).
+- Reflection (2026). Beam-1.0-501B-A23B-NVFP4. [Hugging Face model card](https://huggingface.co/reflection/Beam-1.0-501B-A23B-NVFP4).
 - Sheng, L., Zhang, A., Wu, Z., et al. (2025). On Reasoning Strength Planning in Large Reasoning Models. [arXiv:2506.08390](https://arxiv.org/abs/2506.08390).
 - Wang, Y., Ma, X., Zhang, G., et al. (2024). MMLU-Pro: A More Robust and Challenging Multi-Task Language Understanding Benchmark. [arXiv:2406.01574](https://arxiv.org/abs/2406.01574).
 
