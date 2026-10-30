@@ -84,6 +84,10 @@ greedy decoding, prefix caching off.
 | `captures_*_index` | 9,000 / 1,400 | index into the activation captures (below) |
 
 `summary.json` has the headline numbers; `explorer/` holds the per-layer JSON the explorer loads.
+`steering/directions.safetensors` holds every unit's direction (`dirs`, row = `unit`) and the per-layer median
+residual norm (`median_resid`): a push is `dirs[unit] * dose_eff * median_resid[layer]`, added to the residual leaving
+`layer` from position 1 on, which is what the [beam-steer](https://github.com/rycerzes/beam-inside/tree/main/steer)
+plugin's `beam_steer_set` takes.
 
 ### Prompts
 

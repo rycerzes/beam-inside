@@ -17,6 +17,10 @@ the position's kind.
                       think_start, thought1, thought2
   competition_math    effort2 transfer capture: 100 problems (AIME 2024, AIME 2025, AMC 2023 in that order; see
                       effort/competition_math for the source rows) x the dial; kinds n_last, prompt_end
+
+Also OUT/steering/directions.safetensors: the sweep's unit directions (`dirs` [13,424, 5,120] FP16, unit norm, row =
+`unit` in steering_units) and `median_resid` [52] FP32 (median ‖residual‖ leaving each layer). A sweep push was
+delta = dirs[unit] * dose_eff * median_resid[layer], added to the residual leaving `layer` from position 1 on.
 """
 
 import argparse
@@ -24,13 +28,25 @@ import pathlib
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import json
+
+import numpy as np
 import torch
 from safetensors.torch import save_file
 
 parser = argparse.ArgumentParser()
 parser.add_argument("out", type=pathlib.Path)
 parser.add_argument("--runs", type=pathlib.Path, default=pathlib.Path("data/runs"))
+parser.add_argument("--units", type=pathlib.Path, default=pathlib.Path("data/sweep/units.npz"))
 args = parser.parse_args()
+
+units = np.load(args.units)
+median = [q[1] for q in json.loads((args.runs / "20261027-145310" / "stats.json").read_text())["q10_50_90"]]
+(args.out / "steering").mkdir(parents=True, exist_ok=True)
+save_file({"dirs": torch.from_numpy(units["dirs"].astype(np.float16)),
+           "median_resid": torch.tensor(median, dtype=torch.float32)},
+          args.out / "steering" / "directions.safetensors", metadata={"rows": "unit id in steering_units"})
+print(f"steering/directions.safetensors: {units['dirs'].shape}, median_resid {len(median)} layers")
 SETS = {"gsm8k_effort": (args.runs / "20261027-145310", "effort_capture_*.pt",
                          ("n_last", "sys_end", "think_start", "thought1", "thought2")),
         "competition_math": (args.runs / "20261028-044229", "effort2_capture_*.pt", ("n_last", "prompt_end"))}
