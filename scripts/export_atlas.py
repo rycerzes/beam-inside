@@ -128,16 +128,30 @@ analysis = json.loads((MAIN / "effort_analysis.json").read_text())
 for t in analysis["experts"]["think_start"]["top"]:
     effort_rd[(t["layer"], t["expert"])] = t["rd"]
 
+# ranked_matched.jsonl carries the unit's lens (the tokens its + push promotes) on both of its pole rows, and the
+# judge items and Beam's labels took the label from there. So only + poles were labelled and judged with their own
+# tokens; a - push promotes the opposite side of the same weight direction, read here from the atlas. For - poles
+# the label-based columns are left empty, and judge/items keeps their items flagged as a label/pole mismatch.
+atlas = {}
+for path in (DATA / "atlas").glob("experts_L*.jsonl"):
+    for e in jsonl(path):
+        for q in e["poles"]:
+            atlas[(e["layer"], e["expert"], q["dir"], q["sign"])] = q
+FLIP = {"+": "-", "-": "+"}
 poles = []
 for r in ranked:
     if r["kind"] != "expert_dir":
         continue
     i = pid(r["layer"], r["expert"], r["pole"])
     lab, jt, jb = labels.get(i, {}), judge_tok.get(i), judge_beam.get(i)
+    lens, lens_z = r["lens"], r["z"]
+    if r["pole"] == "-":
+        opp = atlas[(r["layer"], r["expert"], r["dir"], FLIP[r["sign"]])]
+        lens, lens_z, lab, jt, jb = opp["tokens"], opp["z_mean"], {}, None, None
     sig = r["null"] != "untestable" and (r["pct_matched"] or 0) >= 0.95
     poles.append({
         "id": i, "unit": r["unit"], "layer": r["layer"], "expert": r["expert"], "dir": r["dir"], "pole": r["pole"],
-        "lens_tokens": tokens(r["lens"]), "lens_z": r["z"],
+        "lens_tokens": tokens(lens), "lens_z": lens_z,
         "beam_name": lab.get("name"), "beam_description": lab.get("description"), "beam_subject": lab.get("subject"),
         "beam_coherent": lab.get("coherent"),
         "dnll": r["dnll"], "theme_score": r["score"], "theme_words": r["theme"], "null": r["null"],
@@ -155,6 +169,7 @@ write("experts/poles", poles)
 
 # ---- blind three-way test ----------------------------------------------------------------------------------------
 write("judge/items", [{"item": k["id"], "pole_id": pid(k["layer"], k["expert"], k["pole"]), "stratum": k["stratum"],
+                       "label_matches_pole": k["pole"] == "+",
                        "answer": k["answer"], "distractors": [pid(*d) for d in k["distractors"]],
                        "layer": k["layer"], "correct_token_label": v["correct"], "confidence_token_label": v["confidence"],
                        "correct_beam_label": (beam_verdicts.get(k["id"]) or {}).get("correct"),
@@ -233,9 +248,9 @@ depth = {b: {"poles": len(ps), "testable": sum(p["null"] != "untestable" for p i
              "significant": rate([p["significant"] for p in ps if p["null"] != "untestable"]),
              "beam_coherent": rate([p["beam_coherent"] for p in ps if p["beam_name"]]),
              "judge_sig_token": rate([v["correct"] for k, v in zip(key.values(), verdicts)
-                                      if k["stratum"] == "sig" and band(k["layer"]) == b]),
+                                      if k["stratum"] == "sig" and k["pole"] == "+" and band(k["layer"]) == b]),
              "judge_random_token": rate([v["correct"] for k, v in zip(key.values(), verdicts)
-                                         if k["stratum"] == "random" and band(k["layer"]) == b])}
+                                         if k["stratum"] == "random" and k["pole"] == "+" and band(k["layer"]) == b])}
          for b, ps in sorted(by_band.items(), key=lambda kv: int(kv[0][1:].split("-")[0]))}
 e2_acc = collections.defaultdict(list)
 e2_think = collections.defaultdict(list)
@@ -248,12 +263,16 @@ summary = {
     "sweep": {"units": len(units), "expert_poles": len(poles), "testable": len(testable),
               "significant": sum(p["significant"] for p in poles),
               "expected_by_chance": round(0.05 * len(testable))},
-    "judge": {s: rate([v["correct"] for k, v in zip(key.values(), verdicts) if k["stratum"] == s])
+    # label-based results on + poles, whose label describes the pushed direction (see the note above poles)
+    "judge": {s: rate([v["correct"] for k, v in zip(key.values(), verdicts) if k["stratum"] == s and k["pole"] == "+"])
               for s in ("sig", "random")},
     "judge_beam_label": {s: rate([beam_verdicts[k["id"]]["correct"] for k in key.values()
-                                  if k["stratum"] == s and k["id"] in beam_verdicts]) for s in ("sig", "random")},
+                                  if k["stratum"] == s and k["pole"] == "+" and k["id"] in beam_verdicts])
+                         for s in ("sig", "random")},
     "judge_confident_sig": rate([v["correct"] for k, v in zip(key.values(), verdicts)
-                                 if k["stratum"] == "sig" and v["confidence"] == 3]),
+                                 if k["stratum"] == "sig" and k["pole"] == "+" and v["confidence"] == 3]),
+    "judge_mismatched_label": {s: rate([v["correct"] for k, v in zip(key.values(), verdicts)
+                                        if k["stratum"] == s and k["pole"] == "-"]) for s in ("sig", "random")},
     "self_label": {"labelled": sum(p["beam_name"] is not None for p in poles),
                    "coherent": sum(bool(p["beam_coherent"]) for p in poles),
                    "sig_if_coherent": rate([p["significant"] for p in testable if p["beam_coherent"] is True]),
